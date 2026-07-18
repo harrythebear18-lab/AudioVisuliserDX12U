@@ -1,0 +1,147 @@
+# RTX Audio Visualizer DX12U
+
+A high-fidelity, real-time GPU audio visualizer for Windows, built on **DirectX 12 Ultimate** with HLSL shader-based rendering. It captures system audio via WASAPI, performs FFT analysis through a C# audio pipeline, and drives 29 distinct visualization modes rendered entirely on the GPU.
+
+## Features
+
+- **29 visualization modes** — from spectrum bars to raymarched fractals, synthwave grids, and 3D rain particles
+- **Real-time audio analysis** — WASAPI loopback capture, 8-band spectrum analyzer, tempo/beat detection, kick/transient detection
+- **Fully GPU-rendered** — all visuals are pixel shaders in HLSL, compiled at runtime via DXC
+- **DX12 Ultimate support** — leverages DXR, mesh shaders, and work graphs where available
+- **Audio-reactive everything** — bass, mids, highs, kick, beat, transient, stereo balance, and spectrum data all feed into shader uniforms
+- **Ollama vision feedback** — optional AI-driven visual quality assessment loop
+
+## Architecture
+
+```
+AudioPipeline (C# DLL)
+    └── WASAPI Capture → FFT → 8-Band Analyzer → LightingBrain
+         ↓
+    RDMA Triple Buffer (zero-copy GPU upload)
+         ↓
+    DX12Renderer (C#)
+    └── HLSL Pixel Shaders (29 modes, runtime-compiled via DXC)
+         └── Audio constant buffers + spectrum textures → shader uniforms
+```
+
+### Components
+
+| Component | Description |
+|-----------|-------------|
+| `AudioPipeline/` | C# DLL — WASAPI audio capture, FFT, band analysis, tempo/kick detection |
+| `DXRenderer/` | C# DX12 renderer — swap chain, shader compilation, constant buffers, mode management |
+| `RDMAReader/` | RDMA signal backbone — triple-buffered zero-copy data transfer |
+| `shaders/` | 29 HLSL pixel shaders + shared includes (audio, noise, SDF, raymarch, postfx) |
+| `shaders/include/` | Shared shader libraries — `audio_cb.hlsl`, `noise.hlsl`, `sdf.hlsl`, `raymarch.hlsl`, `postfx.hlsl`, `audio_reactive.hlsl`, `layers.hlsl`, `color_utils.hlsl` |
+| `audio/` | Python audio engine bridge (legacy/alternative path) |
+| `render/` | Python GPU renderer bridge (legacy/alternative path) |
+| `electron/` | Electron-based UI shell |
+| `models/` | ONNX models for CLIP-based vision feedback |
+| `native/` | Pre-built native DLLs (AudioPipeline, WASAPI) |
+
+## Visualization Modes
+
+| # | Key | Name | Description |
+|---|-----|------|-------------|
+| 0 | `quantum_bars` | Quantum Bars | 3D spectrum bars with quantum clouds |
+| 1 | `plasma_field` | Plasma Field | Domain-warped FBM fluid |
+| 2 | `neon_pulse` | Neon Pulse | Concentric rings + waveform |
+| 3 | `particle_flow` | Particle Flow | Curl-noise vector field |
+| 4 | `waveform` | Spectrum Ribbons | Multi-layer 3D waveform ribbons |
+| 5 | `sphere` | Spectrum Resonator | Raymarched displaced sphere + aura |
+| 6 | `aurora` | Aurora Borealis | Curtains + starfield |
+| 7 | `dna_helix` | DNA Helix | Double helix + energy flow |
+| 8 | `heartbeat` | Spectrum Singularity | Heart SDF + ECG + pulse rings |
+| 9 | `rtx_mesh` | RTX Mesh | Deformable grid + reflective floor |
+| 10 | `ray_marched` | Spectrum Kaleidoscope | Kaleidoscopic fractal |
+| 11 | `volumetric_clouds` | Volumetric Clouds | 3D noise + lightning |
+| 12 | `fractal_dimensions` | Fractal Dimensions | Mandelbulb + orbit trap |
+| 13 | `neural_network` | Neural Network | Firing neurons + signals |
+| 14 | `quantum_field` | Quantum Field | Probability waves + entanglement |
+| 15 | `holographic` | Holographic | Wireframe + scan lines + glitch |
+| 16 | `particle_storm` | Particle Storm | Vortex + lightning |
+| 17 | `crystal` | Spectrum Black Hole | Gravitational lensing + accretion disk |
+| 18 | `terrain` | Spectrum Terrain | Ridged noise mountains flyover |
+| 19 | `galaxy` | Spectrum Galaxy | Volumetric spiral arms + core bulge |
+| 20 | `wave_tessellation` | Wave Pool + Tessellation | Tessellated water surface |
+| 21 | `audio_tessellation` | Audio Tessellation | Voronoi terrain with audio |
+| 22 | `compute_shaders` | Spectrum Vortex | 3D raymarched vortex |
+| 23 | `rtx_reflections` | Spectrum Reflections | Chrome spheres + mirror floor |
+| 24 | `spectrum_3d` | 3D Spectrum Bars | 3D frequency bars |
+| 25 | `spatial_dolby` | Spatial Dolby | 3D spatial audio field |
+| 26 | `water_droplets` | Water Droplet Pool | 3D ripple physics with droplet impacts |
+| 27 | `matrix_rain` | 3D Rain Particles | Falling streaks with parallax depth + audio-reactive density |
+| 28 | `waveform_tunnel` | Audio Waveform Tunnel | Neon polar tunnel flythrough with spectrum-modulated rings |
+| 29 | `crystal_lattice` | Synthwave Grid | Tron-style perspective grid with sun and audio shockwaves |
+
+## Audio Data Available to Shaders
+
+Each shader receives a structured `AudioData` buffer with:
+
+- **8 frequency bands** (`b0`–`b7`) — sub-bass, bass, low-mids, high-mids, presence, brilliance, air, sparkle
+- **Kick** — detected kick drum onset with confidence (`kick`, `kickConf`)
+- **Beat** — tempo-tracked beat phase
+- **Transient** — general transient onset detection
+- **Stereo** — balance and difference (`stereoBal`, `stereoDiff`)
+- **Spectrum texture** — full FFT spectrum sampled via `u_spectrum`
+- **Motion** — speed, brightness, saturation, bloom controls
+- **Section/scene** — automatic scene detection for color shifts
+
+## Controls
+
+- **ESC** — Quit
+- **M** — Next visualization mode
+- **N** — Previous visualization mode
+- **F** — Toggle fullscreen
+
+## Building
+
+### Prerequisites
+
+- Windows 10/11 (10.0.26100.0+ recommended)
+- .NET 10 SDK
+- DirectX 12 Ultimate-capable GPU (NVIDIA RTX series recommended)
+- DXC compiler (bundled with Vortice.Dxc)
+- Visual Studio 2022 (optional, for C++ native components)
+
+### Build
+
+```bash
+cd DXRenderer
+dotnet build -c Debug
+```
+
+### Run
+
+```bash
+cd DXRenderer/bin/Debug/net10.0-windows10.0.26100.0
+DXRenderer.exe
+```
+
+## Shader Development
+
+Shaders are HLSL pixel shaders compiled at runtime. Each mode is a single `.hlsl` file in `shaders/dx_*.hlsl` with a `main` entry point.
+
+Shared includes in `shaders/include/` provide:
+
+- `audio_cb.hlsl` — AudioData struct, constant buffer, spectrum sampler
+- `color_utils.hlsl` — HSV/RGB conversions, palette functions
+- `noise.hlsl` — Hash, value noise, FBM, curl noise
+- `sdf.hlsl` — Signed distance functions (sphere, capsule, box, etc.)
+- `raymarch.hlsl` — Ray marching helpers, camera ray generation
+- `postfx.hlsl` — Bloom, tonemapping, vignette, scanlines
+- `audio_reactive.hlsl` — Audio-driven overlays, starfield, god rays
+- `layers.hlsl` — Blend modes, layer compositing
+
+To add a new mode:
+1. Create `shaders/dx_your_mode.hlsl` with a `float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target` entry point
+2. Add the mode key to the modes array and display names in `DX12Renderer.cs`
+3. Rebuild and run
+
+## License
+
+Private project. All rights reserved.
+
+## Repository
+
+[https://github.com/harrythebear18-lab/AudioVisuliserDX12U](https://github.com/harrythebear18-lab/AudioVisuliserDX12U)
