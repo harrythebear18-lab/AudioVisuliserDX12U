@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>RTX Audio Visualizer</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #000; overflow: hidden; font-family: monospace; }
+  #glcanvas { display: block; width: 100vw; height: 100vh; }
+  #hud {
+    position: fixed; top: 8px; left: 8px;
+    color: #0f0; font-size: 12px; pointer-events: none;
+    text-shadow: 0 0 4px #0f0; z-index: 10;
+    background: rgba(0,0,0,0.4); padding: 4px 8px; border-radius: 4px;
+  }
+  #mode-name {
+    position: fixed; bottom: 8px; left: 50%; transform: translateX(-50%);
+    color: #fff; font-size: 14px; pointer-events: none; z-index: 10;
+    text-shadow: 0 0 6px #000; opacity: 0.7;
+  }
+  #error-overlay {
+    position: fixed; top: 50%; left: 50%; transform: translate(-50%,-50%);
+    color: #f44; font-size: 14px; z-index: 20; max-width: 80vw;
+    background: rgba(20,0,0,0.9); padding: 16px; border-radius: 8px;
+    display: none; white-space: pre-wrap;
+  }
+</style>
+</head>
+<body>
+<canvas id="glcanvas"></canvas>
+<div id="hud">Connecting...</div>
+<div id="mode-name"></div>
+<div id="error-overlay"></div>
+<script src="renderer.js"></script>
+</body>
+</html>

@@ -1,0 +1,37 @@
+# Build output
+bin/
+obj/
+[Bb]in/
+[Oo]bj/
+
+# Visual Studio
+.vs/
+*.user
+*.suo
+*.userprefs
+*.cache
+*.pidb
+
+# Logs and temp files
+*.log
+*.txt
+crash.log
+dx*_err.txt
+dx*_out.txt
+dx_error.log
+dx_output.log
+dxc_*.txt
+
+# Temp scripts
+fix_*.ps1
+
+# OS files
+Thumbs.db
+.DS_Store
+
+# Node
+node_modules/
+
+# Electron build
+electron/dist/
+electron/node_modules/

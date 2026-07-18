@@ -1,0 +1,13 @@
+{
+  "name": "rtx-audio-visualizer-electron",
+  "version": "1.0.0",
+  "description": "RTX Audio Visualizer — Electron desktop app with WebGL2/D3D11 shaders",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron . --dev"
+  },
+  "devDependencies": {
+    "electron": "^33.0.0"
+  }
+}
