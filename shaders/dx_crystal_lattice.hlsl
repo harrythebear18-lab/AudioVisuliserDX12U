@@ -94,7 +94,7 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
             // Grid line intensity — thin bright lines
             float lineWidth = 0.02;
             float lineX = smoothstep(lineWidth, 0.0, gridDist.x);
-            float lineZ = smoothstep(lineWidth, 0.0, gridDist.z);
+            float lineZ = smoothstep(lineWidth, 0.0, gridDist.y);
             float gridLines = max(lineX, lineZ);
 
             // Grid scrolling — move forward with time

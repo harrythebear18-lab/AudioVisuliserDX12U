@@ -3,13 +3,24 @@
 // Photon ring on beat, gravitational lensing distorts starfield, kick = gravitational wave
 // Relativistic jets on transients, event horizon size = bass energy, applyPostFX
 #include "include/audio_cb.hlsl"
+#include "include/dsp_cb.hlsl"
 #include "include/color_utils.hlsl"
 #include "include/noise.hlsl"
 #include "include/audio_reactive.hlsl"
-#include "include/postfx.hlsl"
 #include "include/layers.hlsl"
 
 #define DISK_BINS 64
+
+float dspBand(int index) {
+    if (index == 0) return DspBand0;
+    if (index == 1) return DspBand1;
+    if (index == 2) return DspBand2;
+    if (index == 3) return DspBand3;
+    if (index == 4) return DspBand4;
+    if (index == 5) return DspBand5;
+    if (index == 6) return DspBand6;
+    return DspBand7;
+}
 
 float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
     AudioData a = extractAudio();
@@ -17,12 +28,20 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
     float r = length(p);
     float ang = atan2(p.y, p.x);
 
-    // ── Event horizon — radius driven by bass ──
-    float ehR = 0.15 + a.profBass * 0.08 + a.b0 * 0.05;
+    // ── Event horizon — radius driven by bass, LUFS boosts lensing ──
+    float lufs = lufsNormalized();
+    float crest = crestFactorNormalized();
+    float phaseSym = phaseCoherence();
+    float dspLow = (DspBand0 + DspBand1) * 0.5;
+    float dspHigh = (DspBand5 + DspBand6 + DspBand7) / 3.0;
+    float peakSkew = saturate((DspPeakDbR - DspPeakDbL) / 18.0) * 2.0 - 1.0;
+    float ehR = 0.15 + a.profBass * 0.12 + a.b0 * 0.08 + dspLow * 0.035;
+    ehR *= (1.0 + lufs * 0.20);  // LUFS: louder = slightly larger event horizon
 
-    // ── Gravitational lensing distortion ──
+    // ── Gravitational lensing distortion — LUFS strengthens lensing ──
     // Bend light around the black hole — sample background at distorted position
     float lensStrength = ehR * ehR / max(r * r, 0.001);
+    lensStrength *= (1.0 + lufs * 0.3);  // LUFS: louder = stronger lensing
     float2 lensDir = normalize(p) * lensStrength * 0.3;
     float2 lensUV = uv - lensDir * 0.15;
 
@@ -41,22 +60,19 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
         float photonR = ehR * 1.5;
         float photonGlow = exp(-abs(r - photonR) * 80.0) * 0.8;
         col += a.brainCol2 * photonGlow * (0.5 + a.beat * 0.5 * a.tempoConf) * (1.0 - a.isSilent);
-        // ── Brightness limiter ──
-        float mc1 = max(col.r, max(col.g, col.b));
-        if (mc1 > 1.2) col *= 1.2 / mc1;
-        return float4(applyPostFX(col, uv, a), 1.0);
+        return float4(col, 1.0);
     }
 
     // ── Accretion disk — 64 frequency bins orbiting ──
     // Disk is tilted — perspective compression on Y
-    float diskTilt = 0.3 + a.stereoBal * 0.1;
+    float diskTilt = 0.3 + a.stereoBal * 0.1 + peakSkew * 0.025;
     float diskY = p.y * diskTilt;  // flatten Y for disk plane
     float diskR = length(float2(p.x, diskY));
     float diskAng = atan2(diskY, p.x);
 
     // Disk inner/outer radius
     float diskInner = ehR * 1.8;
-    float diskOuter = 1.2 + a.overall * 0.3;
+    float diskOuter = 1.2 + a.overall * 0.48 + a.envelope * 0.16;
 
     if (diskR > diskInner && diskR < diskOuter) {
         // Map disk radius to frequency bin — inner = high freq, outer = low freq
@@ -72,14 +88,23 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
         float specR = u_spectrum.SampleLevel(u_sampler, float2(freqFrac, 1.0), 0).r;
         float specC = u_spectrum.SampleLevel(u_sampler, float2(freqFrac, 0.5), 0).r;
         float specVal = lerp(specL, specR, stereoSide);
-        specVal = max(specVal, specC * 0.5);
+        specVal = pow(saturate(max(specVal, specC * 0.65)), 0.72);
+        int bandIndex = min(7, (int)(freqFrac * 8.0));
+        float matchingDspBand = dspBand(bandIndex);
+        specVal *= 1.0 + matchingDspBand * 0.24;
 
         // Doppler effect — approaching side brighter (relativistic beaming)
         float doppler = 0.5 + sin(orbitAng) * 0.5;
         float dopplerBoost = 1.0 + doppler * 1.5;
 
-        // Disk brightness — spectrum * doppler * envelope
-        float diskBright = specVal * dopplerBoost * (0.4 + a.envelope * 0.6);
+        // Phase coherence — mono signal = symmetric disk, stereo = asymmetric
+        dopplerBoost *= (1.0 + (1.0 - phaseSym) * 0.4 * sin(orbitAng) + peakSkew * 0.12 * cos(orbitAng));  // stereo widens asymmetry
+
+        // Crest factor — dynamic material = sharper disk features
+        float diskSharp = 1.0 + crest * 0.5;  // crest boosts contrast
+
+        // Disk brightness — spectrum * doppler * envelope * crest sharpness
+        float diskBright = specVal * dopplerBoost * (0.55 + a.envelope * 0.75 + a.beat * 0.18 * a.tempoConf) * diskSharp;
 
         // Disk color — hot inner (white/blue) to cool outer (brain colors)
         float3 hotCol = float3(0.9, 0.95, 1.0);
@@ -90,9 +115,9 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
         float tempGrad = smoothstep(diskInner, diskOuter, diskR);
         diskCol = lerp(hotCol, diskCol, tempGrad);
 
-        // Spiral arms — density waves
+        // Spiral arms — density waves, crest sharpens them
         float spiralPhase = orbitAng * 2.0 + diskR * 8.0 - Time * orbitSpeed * a.motSpeed * 3.0;
-        float spiralDensity = 0.7 + sin(spiralPhase) * 0.3;
+        float spiralDensity = 0.7 + sin(spiralPhase) * (0.3 + crest * 0.2);  // crest = sharper spirals
 
         // Disk thickness — Gaussian falloff above/below disk plane
         float diskThickness = exp(-pow(p.y - diskY / diskTilt * (1.0 - diskTilt), 2.0) * 30.0);
@@ -101,10 +126,10 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
         float radialFade = smoothstep(diskInner, diskInner + 0.05, diskR) * smoothstep(diskOuter, diskOuter - 0.2, diskR);
 
         float diskIntensity = diskBright * spiralDensity * diskThickness * radialFade;
-        col += diskCol * diskIntensity * 0.5 * (1.0 - a.isSilent);
+        col += diskCol * diskIntensity * 0.76 * (1.0 - a.isSilent);
 
         // Hot core glow — bright inner edge
-        float innerGlow = exp(-abs(diskR - diskInner) * 15.0) * specVal * 0.3;
+        float innerGlow = exp(-abs(diskR - diskInner) * 15.0) * specVal * (0.42 + a.beat * 0.12);
         col += hotCol * innerGlow * diskThickness * (1.0 - a.isSilent);
 
         // Frequency-tinted emission
@@ -112,14 +137,15 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
         col += hsv(freqHue, 0.5 * a.satur, specVal * 0.15) * diskThickness * (1.0 - a.isSilent);
     }
 
-    // ── Photon ring — bright ring at 1.5x event horizon ──
+    // ── Photon ring — bright ring at 1.5x event horizon, LUFS boosts glow ──
     float photonR = ehR * 1.5;
-    float photonRing = exp(-abs(r - photonR) * 60.0) * (0.3 + a.beat * 0.4 * a.tempoConf);
+    float photonRing = exp(-abs(r - photonR) * 60.0) * (0.34 + a.beat * 0.62 * a.tempoConf);
+    photonRing *= (1.0 + lufs * 0.35);  // LUFS: louder = brighter photon ring
     col += a.brainCol2 * photonRing * a.bloomActive * (1.0 - a.isSilent);
 
     // ── Gravitational wave — kick creates rippling ring ──
     float gwR = ehR + a.kick * 0.8 * a.kickConf;
-    float gwRing = exp(-abs(r - gwR) * 20.0) * a.kick * 0.15 * a.kickConf;
+    float gwRing = exp(-abs(r - gwR) * 20.0) * a.kick * 0.25 * a.kickConf;
     col += a.brainCol * gwRing * (1.0 - a.isSilent);
 
     // ── Relativistic jets — on transients, perpendicular to disk ──
@@ -128,10 +154,10 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
         float jetX = abs(p.x);
         float jetWidth = 0.03 + a.transient * 0.02;
         float jetFade = exp(-jetX * jetX / (jetWidth * jetWidth)) * exp(-jetY * 0.5);
-        float jetIntensity = a.transient * jetFade * 0.4;
+        float jetIntensity = a.transient * jetFade * (0.62 + dspHigh * 0.22);
         col += a.brainCol2 * jetIntensity * (1.0 - a.isSilent);
         // Jet core — bright white
-        float jetCore = exp(-jetX * jetX * 500.0) * exp(-jetY * 0.3) * a.transient * 0.3;
+        float jetCore = exp(-jetX * jetX * 500.0) * exp(-jetY * 0.3) * a.transient * (0.46 + dspHigh * 0.16);
         col += float3(0.8, 0.9, 1.0) * jetCore * a.bloomActive * (1.0 - a.isSilent);
     }
 
@@ -143,11 +169,5 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
     // ── Foreground overlays ──
     col += standardOverlays(p, r, a) * 0.3;
 
-    // ── Post-processing ──
-    // ── Brightness limiter — prevent bloom blowout ──
-    float maxChannel = max(col.r, max(col.g, col.b));
-    if (maxChannel > 1.2) col *= 1.2 / maxChannel;
-
-    col = applyPostFX(col, uv, a);
     return float4(col, 1.0);
 }

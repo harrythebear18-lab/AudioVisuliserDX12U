@@ -311,6 +311,29 @@ public class DX12HUD : IDisposable
         lineList.Add($"    === Total Pipeline: {f.LatTotalPipelineMs:F3}ms ===");
         colorList.Add(f.LatTotalPipelineMs > 20f ? red : f.LatTotalPipelineMs > 10f ? yellow : green);
 
+        // Resonance DSP — professional audio analysis
+        lineList.Add("");
+        colorList.Add(dim);
+        lineList.Add($"── Resonance DSP ──");
+        colorList.Add(cyan);
+        lineList.Add($"LUFS: M={f.MomentaryLUFS:F1} S={f.ShortTermLUFS:F1} I={f.IntegratedLUFS:F1}");
+        colorList.Add(f.IntegratedLUFS > -8f ? red : f.IntegratedLUFS > -14f ? yellow : green);
+        lineList.Add($"THD: {f.THDPercentage:F2}%  Phase: {f.PhaseCorrelationDSP:F2}");
+        colorList.Add(f.THDPercentage > 5f ? red : f.THDPercentage > 1f ? yellow : white);
+        lineList.Add($"Pk L:{f.PeakDbL:F1} R:{f.PeakDbR:F1}dB  Rms L:{f.RmsDbL:F1} R:{f.RmsDbR:F1}dB");
+        colorList.Add(white);
+        lineList.Add($"Crest L:{f.CrestFactorDbL:F1} R:{f.CrestFactorDbR:F1}dB {(f.CrestFactorDbL < 6f ? "⚠HEADROOM" : "")}");
+        colorList.Add(f.CrestFactorDbL < 6f ? red : f.CrestFactorDbL < 10f ? yellow : green);
+        lineList.Add($"BQ: {f.DspBand0:F3} {f.DspBand1:F3} {f.DspBand2:F3} {f.DspBand3:F3}");
+        colorList.Add(dim);
+        lineList.Add($"    {f.DspBand4:F3} {f.DspBand5:F3} {f.DspBand6:F3} {f.DspBand7:F3}");
+        colorList.Add(dim);
+
+        lineList.Add("");
+        colorList.Add(dim);
+        lineList.Add("Keys: H=HUD  P=Overlay  M/N=Mode  B=Director");
+        colorList.Add(dim);
+
         lines = lineList.ToArray();
         colors = colorList.ToArray();
     }

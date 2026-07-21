@@ -1,161 +1,123 @@
-// Mode 6: Spectrum Resonator — volumetric frequency-displaced energy core
-// Raymarched sphere where surface displacement = directional spectrum sampling
-// 16-band spherical harmonic waves, internal core glow, fresnel rim
-// Kick = radial shockwave, beat = emission pulse, transients = surface crackles
-// Volumetric aura, PBR-style lighting, starfield, applyPostFX
+// Mode 6: Chladni Plate — real standing-wave interference resonance
+// field(x,z) = sum of 8 mode-pair standing waves, one per audio band.
+// Mode number increases with frequency (bass=broad pattern, treble=fine
+// pattern) — a genuine physical analogy, not a metaphor. Section drives how
+// many modes are unlocked (regime), dominant band is highlighted, L/R energy
+// skews mode numbers asymmetrically (independent stereo structure), beat
+// realigns phases (plate strike), kick adds a traveling impulse ripple,
+// transient scatters glints along nodal lines.
 #include "include/audio_cb.hlsl"
+#include "include/dsp_cb.hlsl"
 #include "include/color_utils.hlsl"
 #include "include/noise.hlsl"
-#include "include/sdf.hlsl"
 #include "include/raymarch.hlsl"
 #include "include/audio_reactive.hlsl"
-#include "include/postfx.hlsl"
 #include "include/layers.hlsl"
 
-#define RESONATOR_BANDS 16
+#define PLATE_MODES 8
+#define PI 3.14159265
 
-float sphereSDF(float3 p, AudioData a, float time) {
-    float3 dir = normalize(p);
-    float theta = atan2(dir.x, dir.z) / 6.28318 + 0.5;
-    float phi = asin(clamp(dir.y, -1.0, 1.0)) / 3.14159 + 0.5;
+float chladniField(float2 pc, AudioData a, float regimeLevel, float stereoSkew,
+                    float phaseNorm, float beatSync, out float domContribution, int domIdx)
+{
+    float field = 0.0;
+    domContribution = 0.0;
+    float bands[8] = { a.b0, a.b1, a.b2, a.b3, a.b4, a.b5, a.b6, a.b7 };
 
-    // Directional spectrum sampling — theta = frequency, phi = L/R blend
-    float specL = u_spectrum.SampleLevel(u_sampler, float2(theta, 0.0), 0).r;
-    float specR = u_spectrum.SampleLevel(u_sampler, float2(theta, 1.0), 0).r;
-    float specC = u_spectrum.SampleLevel(u_sampler, float2(theta, 0.5), 0).r;
-    float specVal = lerp(specL, specR, phi);
-    specVal = max(specVal, specC * 0.5);
+    [unroll] for (int i = 0; i < PLATE_MODES; i++)
+    {
+        float unlock = saturate(regimeLevel * float(PLATE_MODES) - float(i) + 2.0);
+        float amp = bands[i] * unlock;
 
-    float baseR = 0.7 + a.profBass * 0.12 + a.envelope * 0.04;
-    float disp = specVal * 0.2 * a.barScale;
+        float m = float(i + 1);
+        float skew = 1.0 + stereoSkew * 0.4 * (1.0 - phaseNorm);
+        float n = m * skew;
 
-    // Spherical harmonic waves — 4 bands modulated by spectrum
-    [unroll] for (int bi = 0; bi < 4; bi++) {
-        float bandFreq = float(bi + 1) * 2.0;
-        float bandPhase = time * (1.0 + bi * 0.3) * a.motSpeed;
-        float bandAmp = u_spectrum.SampleLevel(u_sampler, float2(float(bi) / 16.0, 0.5), 0).r;
-        disp += sin(theta * 6.28318 * bandFreq + bandPhase) * cos(phi * 3.14159 * bandFreq) * bandAmp * 0.04;
+        float phi = Time * (0.12 + a.motSpeed * 0.08) * (1.0 + float(i) * 0.05);
+        phi = lerp(phi, 0.0, beatSync * 0.6);
+
+        float contribution = amp * cos(m * PI * pc.x + phi) * cos(n * PI * pc.y + phi);
+        field += contribution;
+        if (i == domIdx) domContribution = contribution;
     }
-
-    // Transient crackles
-    disp += a.transient * 0.02 * sin(theta * 6.28318 * 16.0 + time * 12.0);
-
-    // Kick shockwave — radial bulge traveling outward
-    float kickR = a.kick * 0.6 * a.kickConf;
-    float kickDist = length(p);
-    disp += exp(-abs(kickDist - kickR) * 8.0) * a.kick * 0.08;
-
-    return sdSphere(p, baseR + disp);
-}
-
-float3 calcNormal(float3 p, AudioData a, float time) {
-    float eps = 0.001;
-    return normalize(float3(
-        sphereSDF(p + float3(eps,0,0), a, time) - sphereSDF(p - float3(eps,0,0), a, time),
-        sphereSDF(p + float3(0,eps,0), a, time) - sphereSDF(p - float3(0,eps,0), a, time),
-        sphereSDF(p + float3(0,0,eps), a, time) - sphereSDF(p - float3(0,0,eps), a, time)
-    ));
+    return field;
 }
 
 float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
     AudioData a = extractAudio();
     float2 p = screenToAspect(uv);
-    float r = length(p);
+    float r0 = length(p);
+    float silence = 1.0 - a.isSilent;
+    float lufs = lufsNormalized();
+    float crest = crestFactorNormalized();
 
     // ── Background ──
-    float3 col = float3(0.008, 0.006, 0.015) * (1.0 - a.isSilent * 0.98);
-    col += starfield(uv, a) * 0.3;
+    float3 col = float3(0.008, 0.006, 0.016) * silence;
+    col += starfield(uv, a) * 0.12;
 
-    // Volumetric aura — brain-colored glow around sphere
-    float auraGlow = exp(-r * r * 0.8) * (0.1 + a.bloom * 0.12 * a.bloomActive + a.envelope * 0.04);
-    col += a.brainCol2 * auraGlow * (1.0 - a.isSilent);
-    float innerAura = exp(-r * r * 2.5) * (0.05 + a.beat * 0.06 * a.tempoConf);
-    col += a.brainCol * innerAura * (1.0 - a.isSilent);
+    // ── Camera — ray/plane intersection (genuine 3D perspective, not a 2D trick) ──
+    float3 camPos = float3(a.stereoBal * 0.15, 1.7, 2.0);
+    float3 camTarget = float3(0.0, -0.15, 0.0);
+    float3 rd = cameraRay(camPos, camTarget, p, 1.0);
 
-    // Camera — slow stereo-driven orbit
-    float camAng = a.stereoBal * 0.3 + Time * 0.05 * a.motSpeed;
-    float camDist = 3.0 + a.profBass * 0.2;
-    float3 camPos = float3(sin(camAng) * camDist, 0.3 + a.stereoDiff * 0.15, cos(camAng) * camDist);
-    float3 rd = cameraRay(camPos, float3(0, 0, 0), p, 1.0);
+    float plateRadius = 1.3;
 
-    // Raymarch
-    float t = 0.05;
-    float marchGlow = 0.0;
-    float steps = 0.0;
-    bool hit = false;
+    if (rd.y < -0.0005)
+    {
+        float t = -camPos.y / rd.y;
+        float3 hit = camPos + rd * t;
+        float2 plateCoord = hit.xz;
+        float r = length(plateCoord);
 
-    [loop] for (int i = 0; i < 48; i++) {
-        float3 sp = camPos + rd * t;
-        float d = sphereSDF(sp, a, Time);
-        marchGlow += 0.015 / (1.0 + d * d * 30.0);
-        steps += 1.0;
-        if (d < 0.001) { hit = true; break; }
-        t += d * 0.5;
-        if (t > 8.0) break;
+        if (t > 0.0 && r < plateRadius)
+        {
+            // ── Brain-macro regime + structure ──
+            float regimeLevel = saturate(a.section);
+            float stereoSkew = a.rightEn - a.leftEn;
+            float phaseNorm = saturate(a.phaseCorr * 0.5 + 0.5);
+            float beatSync = a.beat * a.tempoConf;
+            int domIdx = clamp(int(a.domBand * 8.0), 0, 7);
+
+            float domContribution;
+            float field = chladniField(plateCoord, a, regimeLevel, stereoSkew, phaseNorm, beatSync, domContribution, domIdx);
+
+            // Kick impulse ripple — traveling disturbance on the plate
+            float kickTravel = frac(Time * 1.2) * plateRadius * 1.3;
+            field += a.kick * a.kickConf * 0.35 * exp(-abs(r - kickTravel) * 6.0);
+
+            // ── Shading: nodal lines (sand collects at zero-crossings) + antinode fill ──
+            float lineSharpness = 34.0 / (1.0 + crest * 0.6);
+            float nodeLine = exp(-field * field * lineSharpness);
+            float antinodeMag = saturate(abs(field));
+
+            float zoneT = saturate(r / plateRadius);
+            float3 fillColor = lerp(a.brainCol, a.brainCol2, zoneT);
+            float domHighlight = saturate(abs(domContribution) * 3.0);
+            fillColor = lerp(fillColor, a.brainCol3, domHighlight * 0.5);
+
+            float baseBrightness = (0.14 + a.envelope * 0.22) * (1.0 + lufs * 0.25);
+            float3 plateCol = fillColor * antinodeMag * baseBrightness;
+            plateCol += float3(1.0, 0.98, 0.9) * nodeLine * (0.45 + a.brightness * 0.35);
+
+            // Transient glints along nodal lines
+            float sparkleNoise = hash21(plateCoord * 220.0 + floor(Time * 10.0));
+            float glint = step(0.985 - a.transient * 0.4, sparkleNoise) * nodeLine * a.transient;
+            plateCol += a.brainCol3 * glint * 0.9;
+
+            // Edge fade + distance fog (real perspective depth, from actual ray distance)
+            plateCol *= smoothstep(plateRadius * 1.05, plateRadius * 0.55, r);
+            plateCol *= exp(-t * 0.12);
+
+            col += plateCol * silence;
+        }
+
+        // Rim glow at plate boundary
+        float rimGlow = exp(-abs(length(float2(hit.x, hit.z)) - plateRadius) * 8.0) * (0.12 + a.beat * 0.18 * a.tempoConf);
+        col += lerp(a.brainCol, a.brainCol2, 0.5) * rimGlow * step(t, 8.0) * step(0.0, t) * silence;
     }
-    float ao = 1.0 - steps / 48.0 * 0.4;
-
-    if (hit) {
-        float3 hp = camPos + rd * t;
-        float3 n = calcNormal(hp, a, Time);
-
-        // Directional spectrum at hit point
-        float3 dir = normalize(hp);
-        float theta = atan2(dir.x, dir.z) / 6.28318 + 0.5;
-        float phi = asin(clamp(dir.y, -1.0, 1.0)) / 3.14159 + 0.5;
-        float specL = u_spectrum.SampleLevel(u_sampler, float2(theta, 0.0), 0).r;
-        float specR = u_spectrum.SampleLevel(u_sampler, float2(theta, 1.0), 0).r;
-        float specC = u_spectrum.SampleLevel(u_sampler, float2(theta, 0.5), 0).r;
-        float specVal = lerp(specL, specR, phi);
-        specVal = max(specVal, specC * 0.5);
-
-        // 3-light setup
-        float3 lDir1 = normalize(float3(0.5, 1.0, 0.3));
-        float3 lDir2 = normalize(float3(-1.0 + a.stereoBal, 0.5, 0.2));
-        float3 lDir3 = normalize(float3(0.0, -0.5, 0.8));
-        float diff1 = max(dot(n, lDir1), 0.0);
-        float diff2 = max(dot(n, lDir2), 0.0) * 0.4;
-        float diff3 = max(dot(n, lDir3), 0.0) * 0.2;
-        float spec = pow(max(dot(reflect(-lDir1, n), -rd), 0.0), 96.0);
-        float fres = pow(1.0 - max(dot(n, -rd), 0.0), 4.0 + a.overall * 3.0);
-
-        // Surface color — frequency-position driven
-        float hue = a.hueBase + theta * a.hueRange + phi * 0.1 + a.section * 0.03;
-        float3 baseCol = hsv(hue, 0.7 * a.satur, 0.5 + specVal * 0.3);
-        float3 coreCol = a.brainCol * (0.6 + a.brightness * 0.4);
-
-        float3 litCol = baseCol * (diff1 + diff2 + diff3) * (0.5 + a.brightness * 0.4);
-        litCol += float3(1.0, 0.95, 0.8) * spec * 0.5 * a.dynLight * a.dynActive;
-        litCol = lerp(litCol, coreCol, fres * 0.4);
-        litCol += a.brainCol2 * fres * (0.5 + specVal * 0.3) * a.bloomActive;
-
-        // Spectrum emission
-        float emit = specVal * 0.3 * a.envelope;
-        litCol += hsv(hue, 0.5 * a.satur, emit) * (1.0 - a.isSilent);
-
-        // Beat emission
-        float beatEmit = a.beat * 0.25 * a.tempoConf * fres;
-        litCol += hsv(a.hueCenter, 0.4, beatEmit) * (1.0 - a.isSilent);
-
-        // Kick flash
-        float kickFlash = exp(-length(hp) * 3.0) * a.kick * 0.2 * a.kickConf;
-        litCol += a.brainCol2 * kickFlash * (1.0 - a.isSilent);
-
-        litCol *= ao * (0.4 + a.ambient * 0.6) * a.ambActive;
-        col = blendScreen(col, litCol);
-    }
-
-    // March glow — volumetric
-    col += a.brainCol2 * marchGlow * 0.06 * a.bloomActive * (1.0 - a.isSilent);
 
     // ── Foreground overlays ──
-    col += standardOverlays(p, r, a) * 0.4;
+    col += standardOverlays(p, r0, a) * 0.12;
 
-    // ── Post-processing ──
-    // ── Brightness limiter — prevent bloom blowout ──
-    float maxChannel = max(col.r, max(col.g, col.b));
-    if (maxChannel > 1.2) col *= 1.2 / maxChannel;
-
-    col = applyPostFX(col, uv, a);
     return float4(col, 1.0);
 }

@@ -4,6 +4,7 @@
 // Kick lunges bass forward, transients scatter, stereo width expands field
 // Phase coherence links, room grid, brain-driven colors, applyPostFX
 #include "include/audio_cb.hlsl"
+#include "include/dsp_cb.hlsl"
 #include "include/color_utils.hlsl"
 #include "include/noise.hlsl"
 #include "include/audio_reactive.hlsl"
@@ -26,6 +27,10 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
     AudioData a = extractAudio();
     float2 p = screenToAspect(uv);
     float r = length(p);
+
+    // DSP complement — additive to brain data, never replaces
+    float lufs = lufsNormalized();
+    float phase = phaseCoherence();  // 0=out-of-phase, 1=mono
 
     // ── Background ──
     float3 col = float3(0.008, 0.006, 0.015) * (1.0 - a.isSilent * 0.98);
@@ -98,9 +103,12 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
     float objDep[NUM_OBJ];
 
     // Stereo width expands/contracts field — dynamic with music
+    // DSP phase coherence: mono signal = narrower field, stereo = wider
     float widthScale = 1.0 + a.stereoWid * 1.5;
+    widthScale *= (1.0 + (1.0 - phase) * 0.3);  // stereo phase = wider spatial spread
     // Energy pushes everything toward listener on surges
-    float energyPush = a.energy * 0.8;
+    // LUFS: louder = more intense push toward listener
+    float energyPush = a.energy * 0.8 * (1.0 + lufs * 0.2);
     // Kick lunges bass objects forward
     float kickLunge = a.kick * a.kickConf * 1.5;
     // Transient scatters objects vertically
@@ -155,9 +163,9 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
         float baseSize = 0.04 + intensity * 0.08;
         float screenSize = baseSize / depth * 3.0;
 
-        // Outer glow
+        // Outer glow — LUFS boosts intensity (additive to brain)
         float outerGlow = exp(-screenDist * screenDist / (screenSize * screenSize * 6.0));
-        col += oCol * outerGlow * intensity * 0.3 * (1.0 - a.isSilent);
+        col += oCol * outerGlow * intensity * 0.3 * (1.0 + lufs * 0.2) * (1.0 - a.isSilent);
 
         // Mid glow — main body
         float midGlow = exp(-screenDist * screenDist / (screenSize * screenSize * 2.0));
@@ -189,6 +197,8 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
         float2 closest = a2 + lineNorm * proj;
         float lineDist = length(p - closest);
         float lineStr = a.phaseCorr * objInt[ci] * objInt[ci + 1] * 0.08;
+        // DSP phase coherence: mono signal = stronger spatial coherence links
+        lineStr *= (1.0 + phase * 0.5);
         float lineGlow = exp(-lineDist * lineDist * 500.0) * lineStr;
         col += objCol[ci] * lineGlow * (1.0 - a.isSilent);
     }

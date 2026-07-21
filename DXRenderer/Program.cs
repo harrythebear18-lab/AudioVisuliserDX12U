@@ -156,6 +156,9 @@ static class Program
                 case Keys.H:
                     renderer?.ToggleHUD();
                     break;
+                case Keys.P:
+                    renderer?.ToggleSkiaOverlay();
+                    break;
                 case Keys.B:
                     if (directorHud == null || directorHud.IsDisposed)
                     {

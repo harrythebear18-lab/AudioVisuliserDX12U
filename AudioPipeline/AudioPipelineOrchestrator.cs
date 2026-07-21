@@ -1,5 +1,6 @@
 using System;
 using System.Runtime.InteropServices;
+using StageSimWASAPI.DSP;
 
 namespace StageSimWASAPI
 {
@@ -75,6 +76,7 @@ namespace StageSimWASAPI
         // Colors (normalized 0-1)
         public float ColorR; public float ColorG; public float ColorB;
         public float Color2R; public float Color2G; public float Color2B;
+        public float Color3R; public float Color3G; public float Color3B;
 
         // Triggers (0 or 1)
         public int BeatDetected;
@@ -97,6 +99,7 @@ namespace StageSimWASAPI
         private CircularAudioBuffer _circularBuffer;
         private AudioAnalyzer _analyzer;
         private LightingBrain _brain;
+        private DspPipeline _dspPipeline;
 
         // Triple-buffered FFT — WASAPI thread writes, brain thread reads, slots recycled immediately
         private TripleBufferedFFT _tripleFFT;
@@ -374,6 +377,8 @@ namespace StageSimWASAPI
 
                 _analyzer = new AudioAnalyzer(_fftSize, _sampleRate);
                 _brain = new LightingBrain();
+                _dspPipeline = new DspPipeline();
+                _dspPipeline.Prepare(_sampleRate, _fftSize);
 
                 _running = true;
                 Console.WriteLine($"[AudioPipeline] Started: {_channels}ch, {_sampleRate}Hz, {_capture.BitsPerSample}bit");
@@ -523,6 +528,15 @@ namespace StageSimWASAPI
                     }
 
                     long tsAfterDeint = _pipeTimer.ElapsedTicks;
+
+                    // Resonance DSP pipeline — LUFS, THD, phase correlation, level metering
+                    if (_dspPipeline != null && _channels == 2)
+                    {
+                        int monoSize = _fftSize / 2;
+                        _dspPipeline.ProcessStereo(
+                            _audioLeftBuffer.AsSpan(0, monoSize),
+                            _audioRightBuffer.AsSpan(0, monoSize));
+                    }
 
                     // FFT → triple buffer
                     FFTProvider.ComputeMagnitudeSpectrum(_audioFftBuffer, _audioFftOutput, _fftSize);
@@ -696,6 +710,8 @@ namespace StageSimWASAPI
                 frame.ColorR = c.r / 255f; frame.ColorG = c.g / 255f; frame.ColorB = c.b / 255f;
                 var c2 = _brain.SecondaryColor;
                 frame.Color2R = c2.r / 255f; frame.Color2G = c2.g / 255f; frame.Color2B = c2.b / 255f;
+                var c3 = _brain.TertiaryColor;
+                frame.Color3R = c3.r / 255f; frame.Color3G = c3.g / 255f; frame.Color3B = c3.b / 255f;
             }
 
             _frameWrite = frame;
@@ -740,6 +756,7 @@ namespace StageSimWASAPI
                 SectionHueRange = frame.SectionHueRange,
                 ColorR = frame.ColorR, ColorG = frame.ColorG, ColorB = frame.ColorB,
                 Color2R = frame.Color2R, Color2G = frame.Color2G, Color2B = frame.Color2B,
+                Color3R = frame.Color3R, Color3G = frame.Color3G, Color3B = frame.Color3B,
                 BeatCount = frame.BeatCount, PhraseBeat = frame.PhraseBeat,
                 SectionConfidence = frame.SectionConfidence, Section = frame.Section,
                 IsSilent = frame.IsSilent, DominantBand = frame.DominantBand,
@@ -778,6 +795,30 @@ namespace StageSimWASAPI
                 LatFrameBuildMs = _latFrameBuildMs,
                 LatTotalPipelineMs = _latTotalPipelineMs,
             };
+
+            // Resonance DSP metrics
+            if (_dspPipeline != null)
+            {
+                vf.MomentaryLUFS = _dspPipeline.MomentaryLUFS;
+                vf.ShortTermLUFS = _dspPipeline.ShortTermLUFS;
+                vf.IntegratedLUFS = _dspPipeline.IntegratedLUFS;
+                vf.THDPercentage = _dspPipeline.THDPercentage;
+                vf.PhaseCorrelationDSP = _dspPipeline.PhaseCorrelation;
+                vf.PeakDbL = _dspPipeline.PeakDbL;
+                vf.PeakDbR = _dspPipeline.PeakDbR;
+                vf.RmsDbL = _dspPipeline.RmsDbL;
+                vf.RmsDbR = _dspPipeline.RmsDbR;
+                vf.CrestFactorDbL = _dspPipeline.CrestFactorDbL;
+                vf.CrestFactorDbR = _dspPipeline.CrestFactorDbR;
+                vf.DspBand0 = _dspPipeline.BandLevels[0];
+                vf.DspBand1 = _dspPipeline.BandLevels[1];
+                vf.DspBand2 = _dspPipeline.BandLevels[2];
+                vf.DspBand3 = _dspPipeline.BandLevels[3];
+                vf.DspBand4 = _dspPipeline.BandLevels[4];
+                vf.DspBand5 = _dspPipeline.BandLevels[5];
+                vf.DspBand6 = _dspPipeline.BandLevels[6];
+                vf.DspBand7 = _dspPipeline.BandLevels[7];
+            }
 
             var spectrum = GetSpectrum();
             Array.Copy(spectrum, _rdmaSpectrum, Math.Min(spectrum.Length, _rdmaSpectrum.Length));
@@ -838,6 +879,7 @@ namespace StageSimWASAPI
             if (!_disposed)
             {
                 Stop();
+                _dspPipeline?.Dispose();
                 // Free pinned buffers
                 if (_pinAudioFft.IsAllocated) _pinAudioFft.Free();
                 if (_pinAudioOut.IsAllocated) _pinAudioOut.Free();

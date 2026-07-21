@@ -1148,6 +1148,11 @@ VSOutput main(VSInput input) {
             _hud.Visible = !_hud.Visible;
     }
 
+    public void ToggleSkiaOverlay()
+    {
+        // SkiaSharp overlay is DX12-only — no-op for DX11
+    }
+
     /// <summary>
     /// Render with an additional shared texture layer from DX12 co-processor.
     /// The sharedSRV is sampled as a third composite layer (t2).

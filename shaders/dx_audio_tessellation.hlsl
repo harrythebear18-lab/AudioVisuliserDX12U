@@ -2,6 +2,7 @@
 // Dark orange-black background, amber Voronoi terrain, fault line glow on beat
 // Heightfield raymarch with Voronoi pattern, wireframe overlay, 48 steps, targets 16ms
 #include "include/audio_cb.hlsl"
+#include "include/dsp_cb.hlsl"
 #include "include/color_utils.hlsl"
 #include "include/noise.hlsl"
 #include "include/sdf.hlsl"
@@ -11,6 +12,8 @@
 
 float tessHeight(float2 xz, AudioData a) {
     float t = Time * 0.1 * a.motSpeed;
+    float lufs = lufsNormalized();
+    float crest = crestFactorNormalized();
     float2 cellSize = float2(0.4, 0.4);
     float2 cell = floor(xz / cellSize);
     float2 cellPos = frac(xz / cellSize);
@@ -35,12 +38,14 @@ float tessHeight(float2 xz, AudioData a) {
     h += a.profBass * 0.15 * smoothstep(0.5, 0.0, length(xz));
     h += a.b3 * 0.08 * sin(xz.x * 3.0 + t * 2.0);
     h += a.b4 * 0.06 * sin(xz.y * 4.0 + t * 1.5);
+    // LUFS: louder = more displacement (additive boost to brain-driven height)
+    h *= (1.0 + lufs * 0.2);
 
-    // Fault line on beat
+    // Fault line on beat — crest sharpens fault edges
     float faultAngle = t * 0.5;
     float2 faultDir = float2(cos(faultAngle), sin(faultAngle));
     float faultDist = abs(dot(xz, faultDir));
-    h += a.kick * 0.2 * a.kickConf * exp(-faultDist * faultDist * 5.0);
+    h += a.kick * 0.2 * a.kickConf * (1.0 + crest * 0.3) * exp(-faultDist * faultDist * 5.0);  // crest = sharper faults
 
     // Voronoi edge enhancement
     float edgeDist = sqrt(minDist);
@@ -119,11 +124,12 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
         float voronoiEdge = smoothstep(0.45, 0.5, max(cellId.x, cellId.y));
         litCol += float3(1.0, 0.6, 0.1) * voronoiEdge * 0.1 * a.brightness;
 
-        // Fault line glow — bright orange/red
+        // Fault line glow — bright orange/red, crest sharpens glow
         float faultAngle = Time * 0.1 * a.motSpeed * 0.5;
         float2 faultDir = float2(cos(faultAngle), sin(faultAngle));
         float faultDist = abs(dot(hp.xz, faultDir));
         float faultGlow = exp(-faultDist * faultDist * 10.0) * a.kick * 0.2 * a.kickConf;
+        faultGlow *= (1.0 + crestFactorNormalized() * 0.4);  // crest: dynamic = brighter fault glow
         litCol += float3(1.0, 0.3, 0.0) * faultGlow * (1.0 - a.isSilent);
 
         col = blendScreen(col, litCol);

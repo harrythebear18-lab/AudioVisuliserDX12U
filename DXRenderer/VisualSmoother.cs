@@ -142,6 +142,7 @@ public class VisualSmoother
             // Shader Control Multipliers
             ColorPrimary = new Vector4(f.ColorR, f.ColorG, f.ColorB, _smHue),
             ColorSecondary = new Vector4(f.Color2R, f.Color2G, f.Color2B, f.SectionHueCenter),
+            ColorTertiary = new Vector4(f.Color3R, f.Color3G, f.Color3B, f.SectionHueRange),
             VisualModifiers = new Vector4(_smBrightness, _smBeam, _smBloom, _smAmbient),
             SystemState = new Vector4(f.PhraseBeat, _smEffect, f.ColorPulse, f.Section)
         };

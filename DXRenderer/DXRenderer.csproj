@@ -17,6 +17,8 @@
     <PackageReference Include="Vortice.DXC" Version="3.8.3" />
     <PackageReference Include="Vortice.Mathematics" Version="2.1.1" />
     <PackageReference Include="Microsoft.ML.OnnxRuntime" Version="1.20.1" />
+    <PackageReference Include="SkiaSharp" Version="3.0.0" />
+    <PackageReference Include="SkiaSharp.NativeAssets.Win32" Version="3.0.0" />
   </ItemGroup>
 
   <ItemGroup>

@@ -47,8 +47,9 @@ cbuffer AudioBrainCB : register(b0)
     SpatialTelemetry   Spatial;
     PerformanceRhythm  Rhythm;
     
-    float4 ColorPrimary;    // RGB values from Color() tracking array
-    float4 ColorSecondary;  // RGB values from C2() tracking array
+    float4 ColorPrimary;    // RGB values from Color() tracking array, w = hueBase
+    float4 ColorSecondary;  // RGB values from C2() tracking array, w = hueCenter
+    float4 ColorTertiary;   // RGB values from C3() blender color, w = hueRange
     
     float4 VisualModifiers; // x: Bright, y: Beam, z: Bloom, w: Ambient
     float4 SystemState;     // x: Phrase Progress, y: Eff, z: Pulse, w: SectionID
@@ -85,7 +86,7 @@ struct AudioData {
     float barScale, motSpeed, satur, persp;
     float leftEn, rightEn, sectionConf, silent;
     float specCent, specSpread, domFreq, domBand;
-    float3 brainCol, brainCol2;
+    float3 brainCol, brainCol2, brainCol3;
     float gated, isSilent;
     float b0, b1, b2, b3, b4, b5, b6, b7;
     float specL, specR, stereoDiff;
@@ -131,8 +132,10 @@ AudioData extractAudio() {
     // Color
     a.brainCol = float3(ColorPrimary.x, ColorPrimary.y, ColorPrimary.z);
     a.brainCol2 = float3(ColorSecondary.x, ColorSecondary.y, ColorSecondary.z);
+    a.brainCol3 = float3(ColorTertiary.x, ColorTertiary.y, ColorTertiary.z);
     a.hueBase = ColorPrimary.w;
     a.hueCenter = ColorSecondary.w;
+    a.hueRange = ColorTertiary.w;
     
     // Visual modifiers
     a.brightness = VisualModifiers.x;
@@ -151,8 +154,7 @@ AudioData extractAudio() {
     // Derive fields not directly in new cbuffer
     a.beatDet = a.beat;
     a.clarity = a.tempoConf;
-    // hueRange widens with spectral clarity — more frequency variation = wider color spread
-    a.hueRange = 0.15 + a.clarity * 0.35 + a.stereoWid * 0.1;
+    // hueRange now comes from the brain via ColorTertiary.w
     
     // Triggers — derived from beat/transient
     a.burstTrig = step(0.7, a.transient);

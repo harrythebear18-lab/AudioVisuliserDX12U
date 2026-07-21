@@ -3,6 +3,7 @@
 // Amplitude drives position offset, energy, color; beat = wave function collapse
 // Phase-linked entanglement, transient = quantum jitter, applyPostFX
 #include "include/audio_cb.hlsl"
+#include "include/dsp_cb.hlsl"
 #include "include/color_utils.hlsl"
 #include "include/noise.hlsl"
 #include "include/audio_reactive.hlsl"
@@ -24,6 +25,10 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
     AudioData a = extractAudio();
     float2 p = screenToAspect(uv);
     float r = length(p);
+
+    // DSP complement — additive to brain data, never replaces
+    float lufs = lufsNormalized();
+    float phase = phaseCoherence();  // 0=out-of-phase, 1=mono
 
     // ── Background ──
     float3 col = float3(0.008, 0.006, 0.015) * (1.0 - a.isSilent * 0.98);
@@ -67,8 +72,9 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
             float2 screenPos = (base + offset) * Aspect * 0.5;
             float dist = length(p - screenPos);
 
-            // Energy = amplitude * envelope
+            // Energy = amplitude * envelope, LUFS boosts particle energy
             float energy = e.intensity * (0.5 + sin(Time * 3.0 + pIdx * 0.7) * 0.3);
+            energy *= (1.0 + lufs * 0.2);  // LUFS: louder = more energetic particles
 
             float probDensity = exp(-dist * dist * 80.0) * energy;
 
@@ -102,6 +108,8 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
                     float2 segClosest = screenPos + segNorm * segProj;
                     float segDist = length(p - segClosest);
                     float linkStrength = audioSimLink(e, eR, a.phaseCorr);
+                    // DSP phase coherence boosts entanglement — mono signal = stronger links
+                    linkStrength *= (1.0 + phase * 0.4);
                     float linkGlow = exp(-segDist * segDist * 250.0) * linkStrength * 0.06;
                     col += hsv(a.hueCenter, 0.4 * a.satur, 1.0) * linkGlow * a.stereoWid * a.dynActive * (1.0 - a.isSilent);
                 }
@@ -123,6 +131,8 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
                     float2 segClosestD = screenPos + segNormD * segProjD;
                     float segDistD = length(p - segClosestD);
                     float linkStrengthD = audioSimLink(e, eD, a.phaseCorr);
+                    // DSP phase coherence boosts entanglement — mono signal = stronger links
+                    linkStrengthD *= (1.0 + phase * 0.4);
                     float linkGlowD = exp(-segDistD * segDistD * 250.0) * linkStrengthD * 0.06;
                     col += hsv(a.hueCenter, 0.4 * a.satur, 1.0) * linkGlowD * a.stereoWid * a.dynActive * (1.0 - a.isSilent);
                 }

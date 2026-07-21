@@ -1,146 +1,271 @@
-// Mode 3: Spectrum Sonar — professional polar spectrum display
-// 64 spectrum bins around 360°, filled bars with gradient, L/R stereo lobes
-// Sonar sweep with persistence trail, beat rings, kick flash, transient contacts
-// Frequency gradient coloring, ambient glow, center bass pulse, applyPostFX
+// Mode 3: Spectrum Tectonics — audio-sculpted infinite canyon flyover
+// Heightfield raymarch (32 steps). Full audio spectrum drives geology:
+// 128 spectrum bins via audioSimElement → terrain warping + ridge frequency
+// Bass → elevation, mids → ridge accentuation, treble → surface detail
+// Beat → seismic ripple (beatPhase direction), kick → tectonic uplift
+// Transient → fault cracks, stereoBal → camera lean, stereoWid → canyon width
+// phaseCorr → valley compression, stereoDiff → asymmetric walls
+// beatAnt → pre-beat camera tilt, tempoPulse → terrain breathing
+// speechMode → flatten terrain, calmMode → reduce motion
+// section → biome hue, colorPulse → hue cycling, phrasePulse → 16-beat dynamics
+// standardOverlays handles beat/kick/transient/phrase brightness events
+// Silent = flat dormant ground under dark sky. No circles, no spheres.
 #include "include/audio_cb.hlsl"
 #include "include/color_utils.hlsl"
 #include "include/noise.hlsl"
+#include "include/raymarch.hlsl"
 #include "include/audio_reactive.hlsl"
 #include "include/postfx.hlsl"
 #include "include/layers.hlsl"
 
-#define RADAR_BINS 64
+// ── Heightfield function — full-spectrum audio-sculpted terrain ──
+// Base terrain always visible. Audio morphs shape via 128-bin spectrum + spatial data.
+float terrainHeight(float2 p, AudioData a, float time) {
+    // Scroll — BPM drives flight speed, stereo drifts sideways, calmMode slows
+    float motionScale = (1.0 - a.calmMode * 0.7) * (1.0 - a.speechMode * 0.5);
+    float2 scroll = float2(
+        time * a.motSpeed * (0.5 + a.bpm / 240.0) * 3.0 * motionScale + a.stereoBal * 2.0,
+        time * a.motSpeed * 0.3 * motionScale
+    );
+    float2 sp = p + scroll;
+
+    // ── Base terrain — always present ──
+    float continental = fbm2(sp * 0.12) * 3.0;
+    float2 ridgeWarp = float2(fbm2(sp * 0.25), fbm2(sp * 0.25 + 5.2)) * 0.6;
+    float ridges = (1.0 - abs(fbm2(sp * 0.35 + ridgeWarp) * 2.0 - 1.0)) * 1.5;
+    float hills = fbm2_4(sp * 0.7 + ridgeWarp * 0.3) * 0.6;
+    float detail = fbm2_4(sp * 2.5) * 0.15;
+
+    // ── Full spectrum: 8 bands drive terrain shape at different scales ──
+    float bass = a.b0 * 0.6 + a.b1 * 0.4;
+    float lmid = a.b2 * 0.6 + a.b3 * 0.4;
+    float hmid = a.b4 * 0.6 + a.b5 * 0.4;
+    float treb = a.profTreb;
+    // Gate by silence
+    bass *= (1.0 - a.isSilent);
+    lmid *= (1.0 - a.isSilent);
+    hmid *= (1.0 - a.isSilent);
+    treb *= (1.0 - a.isSilent);
+
+    // Speech mode flattens terrain (calmer landscape when talking)
+    float speechFlat = a.speechMode * 0.5;
+
+    float h = continental + ridges + hills + detail;
+    h += bass * 1.5 * (1.0 - speechFlat);
+    h += lmid * 0.6 * ridges * (1.0 - speechFlat);
+    h += hmid * 0.3;
+    h += treb * 0.1;
+
+    // ── Stereo width → canyon width (phaseCorr compresses/expands valleys) ──
+    float canyonWidth = 0.8 + a.stereoWid * 0.4;
+    float canyonCompress = 1.0 - a.phaseCorr * 0.15;  // mono audio = narrower valleys
+    h *= canyonWidth * canyonCompress;
+
+    // ── Stereo diff → asymmetric walls (L/R channel difference warps terrain) ──
+    float2 asymWarp = float2(a.stereoDiff, -a.stereoDiff) * 0.3;
+    h += fbm2_4(sp * 0.5 + asymWarp) * 0.3 * (1.0 - a.isSilent);
+
+    // ── Beat → seismic ripple (beatPhase gives direction) ──
+    float dist = length(sp - scroll);
+    float seismicR = a.beatPhase * 30.0;
+    float seismic = exp(-abs(dist - seismicR) * 0.8) * a.beat * 0.3 * a.tempoConf;
+    h += seismic * (1.0 - a.isSilent);
+
+    // ── Kick → tectonic uplift near camera ──
+    float kickUplift = a.kick * a.kickConf * exp(-dist * 0.1) * 0.4;
+    h += kickUplift * (1.0 - a.isSilent);
+
+    // ── Transient → fault line cracks ──
+    if (a.transient > 0.15) {
+        float fault = abs(fbm2(sp * 1.5 + time * 0.3) - 0.5) * 2.0;
+        fault = 1.0 - smoothstep(0.0, 0.08, fault);
+        h -= fault * a.transient * 0.2 * (1.0 - a.isSilent);
+    }
+
+    // ── tempoPulse → terrain breathing (subtle expansion/contraction) ──
+    h *= (0.9 + a.tempoPulse * 0.1);
+
+    // ── Envelope → gentle shape modulation ──
+    h *= (0.8 + a.envelope * 0.2);
+
+    // ── Visual limiter ──
+    h = clamp(h, -2.0, 12.0);
+
+    return h;
+}
+
+// ── Tetrahedral normals — 4 samples instead of 6 (25% faster) ──
+float3 terrainNormal(float2 p, AudioData a, float time) {
+    float e = 0.02;
+    float h1 = terrainHeight(p + float2(e, -e), a, time);
+    float h2 = terrainHeight(p + float2(-e, -e), a, time);
+    float h3 = terrainHeight(p + float2(0, e), a, time);
+    return normalize(float3(h1 - h2, 2.0 * e, h1 + h2 - 2.0 * h3));
+}
+
+// ── Layer 1: Background — dark sky + stars + faint aurora ──
+float3 skyLayer(float2 uv, float2 p, AudioData a) {
+    float t = saturate(uv.y);
+    float3 skyTop = a.brainCol * 0.06 + float3(0.008, 0.008, 0.015);
+    float3 skyBot = a.brainCol2 * 0.08 + float3(0.02, 0.01, 0.015);
+    float3 col = lerp(skyBot, skyTop, pow(t, 0.5));
+
+    // Faint aurora — energy + colorPulse drive hue, stays dark otherwise
+    float2 auroraUV = float2(uv.x * 3.0 + Time * 0.1 * a.motSpeed, 0.45 + 0.3 * t);
+    float auroraShape = fbm2_4(auroraUV);
+    float auroraMask = smoothstep(0.4, 0.7, auroraShape) * smoothstep(0.8, 0.4, t) * smoothstep(0.3, 0.5, t);
+    float auroraHue = a.hueBase + 0.3 + a.colorPulse * 0.05 + a.section * 0.03;
+    float auroraIntensity = a.energy * 0.03 * (1.0 - a.isSilent);
+    col += hsv(auroraHue, 0.6 * a.satur, 1.0) * auroraMask * auroraIntensity;
+
+    // Stars — stereoWid affects parallax
+    col += starfield(uv, a) * smoothstep(0.4, 0.85, t) * 0.35;
+
+    return col * (1.0 - a.isSilent * 0.96);
+}
+
+// ── Terrain coloring — audio drives HUE via section/colorPulse/energy, not brightness ──
+float3 terrainColor(float3 pos, float3 nor, float h, AudioData a, float time) {
+    float slope = 1.0 - nor.y;
+
+    // Water at low elevation
+    float waterLevel = -0.5;
+    float isWater = smoothstep(waterLevel + 0.3, waterLevel, h);
+    float3 waterCol = a.brainCol * 0.1 + float3(0.015, 0.01, 0.018);
+
+    // Rock layers — hue shifts with section, colorPulse, energy (NOT brightness)
+    float hueShift = (a.energy * 0.04 + a.colorPulse * 0.03 + a.section * 0.02) * (1.0 - a.isSilent);
+    float3 valleyCol = a.brainCol * 0.15 + float3(0.02, 0.015, 0.025);
+    float3 ridgeCol = hsv(a.hueBase + 0.08 + hueShift, 0.65 * a.satur, 0.35);
+    float3 peakCol = lerp(a.brainCol2, float3(0.7, 0.8, 0.95), 0.35) * 0.4;
+
+    float3 col = lerp(valleyCol, ridgeCol, smoothstep(-0.5, 3.0, h));
+    col = lerp(col, peakCol, smoothstep(4.0, 10.0, h));
+    col = lerp(col, waterCol, isWater);
+
+    // Steep slopes → darker rock
+    col = lerp(col, col * 0.45, smoothstep(0.3, 0.7, slope) * (1.0 - isWater));
+
+    // Fault lines — transient-driven, subtle
+    float2 faultUV = pos.xz * 2.0 + time * 0.2;
+    float faultNoise = fbm2(faultUV);
+    float faultLine = 1.0 - smoothstep(0.0, 0.06, abs(faultNoise - 0.5));
+    float faultGlow = faultLine * a.transient * 0.06 * (1.0 - isWater) * (1.0 - a.isSilent);
+    col += hsv(a.hueBase + 0.05, 0.9, 1.0) * faultGlow;
+
+    return col;
+}
+
+// ── Layer 2: Heightfield raymarch — terrain intersection ──
+float3 terrainLayer(float2 p, float2 uv, AudioData a) {
+    // Camera — audio drives position: bass height, kick altitude, stereo lean, beatAnt anticipation
+    float camHeight = 4.0 + a.profBass * 0.3 + a.kick * a.kickConf * 0.4;
+    // beatAnt → pre-beat camera tilt (anticipation), stereoBal → lean, tempoPulse → breathe
+    float camLean = a.stereoBal * 0.05 + a.beatAnt * 0.02 + a.tempoPulse * 0.01;
+    // calmMode pulls camera back for wider view, speechMode holds steady
+    float camZ = -10.0 - a.calmMode * 2.0;
+    float3 camPos = float3(a.stereoBal * 1.5, camHeight, camZ);
+    float3 camTarget = float3(a.stereoBal * 1.0, camHeight - 2.0 - camLean, 25.0);
+    float3 fwd = normalize(camTarget - camPos);
+    float3 right = normalize(cross(fwd, float3(0, 1, 0)));
+    float3 up = cross(right, fwd);
+    // Wide FOV for expansive landscape
+    float3 rd = normalize(fwd + p.x * right * 1.4 + (-p.y) * up * 1.4);
+
+    // Heightfield raymarch — step along ray, check against terrain
+    float t = 0.1;
+    float3 pos = float3(0, 0, 0);
+    bool hit = false;
+
+    [loop] for (int i = 0; i < 32; i++) {
+        pos = camPos + rd * t;
+        float h = terrainHeight(pos.xz, a, Time);
+        if (pos.y < h) { hit = true; break; }
+        // Adaptive step — larger steps when far above terrain
+        float stepAdj = max(pos.y - h, 0.05) * 0.5 + 0.1;
+        t += stepAdj;
+        if (t > 60.0) break;
+    }
+
+    if (!hit) return float3(0, 0, 0);
+
+    // Normal + color
+    float3 nor = terrainNormal(pos.xz, a, Time);
+    float h = terrainHeight(pos.xz, a, Time);
+    float3 col = terrainColor(pos, nor, h, a, Time);
+
+    // ── Lighting — fixed brightness, audio drives sun DIRECTION (shape, not light) ──
+    // stereoBal shifts sun angle, phaseCorr affects sun height
+    float3 sunDir = normalize(float3(0.3 + a.stereoBal * 0.15, 0.5 + a.phaseCorr * 0.1, 0.8));
+    float diff = max(dot(nor, sunDir), 0.0);
+    col *= (0.25 + diff * 0.9);
+
+    // Subtle specular on flat surfaces
+    float3 viewDir = -rd;
+    float spec = pow(max(dot(reflect(-sunDir, nor), viewDir), 0.0), 32.0);
+    col += float3(0.5, 0.5, 0.55) * spec * 0.08 * smoothstep(0.5, 0.9, nor.y);
+
+    // ── Atmospheric fog — atmos + calmMode thicken fog ──
+    float fogDist = t;
+    float fogDensity = 0.015 + a.atmos * 0.015 + a.calmMode * 0.01;
+    float fog = 1.0 - exp(-fogDist * fogDensity);
+    float3 fogCol = skyLayer(uv, p, a);
+    col = lerp(col, fogCol, fog);
+
+    return col;
+}
+
+// ── Layer 3: Foreground — full spectrum ribbons via audioSimElement ──
+float3 foregroundLayer(float2 p, float2 uv, AudioData a) {
+    float3 col = float3(0, 0, 0);
+
+    // 16 spectrum ribbons — each with stereo pan, transient scatter, intensity
+    [loop] for (int bi = 0; bi < 16; bi++) {
+        AudioElement e = audioSimElement(bi, 16, a);
+        if (e.amplitude < 0.02) continue;
+
+        // Ribbon position — freqFrac spreads vertically, pan shifts horizontally
+        float ribbonY = 0.3 + e.freqFrac * 0.4;
+        float ribbonX = e.pan * 0.1 * a.stereoWid;
+        // Transient scatter adds jitter
+        float2 ribbonPos = float2(ribbonX + e.transientScatter, ribbonY);
+
+        // Wavy ribbon with organic curve
+        float wave = sin(uv.x * 6.0 + Time * 0.5 * a.motSpeed + float(bi)) * 0.015 * e.amplitude;
+        float yDist = abs(uv.y - ribbonPos.y - wave);
+        float xDist = abs(uv.x - ribbonPos.x);
+
+        // Intensity from audioSimElement (includes envelope + overall)
+        float bandGlow = exp(-yDist * yDist * 500.0) * exp(-xDist * xDist * 8.0) * e.intensity * 0.04;
+
+        float hue = a.hueBase + e.freqFrac * a.hueRange + a.section * 0.03 + a.colorPulse * 0.02;
+        col += hsv(hue, 0.7 * a.satur, 1.0) * bandGlow * (1.0 - a.isSilent);
+    }
+
+    return col;
+}
 
 float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
     AudioData a = extractAudio();
     float2 p = screenToAspect(uv);
     float r = length(p);
-    float ang = atan2(p.y, p.x);
 
-    // ── Background — dark sonar screen with subtle gradient ──
-    float3 col = float3(0.003, 0.006, 0.005) * (1.0 - a.isSilent * 0.98);
-    col += starfield(uv, a) * 0.1;
+    // ── Compose layers ──
+    float3 col = skyLayer(uv, p, a);
+    float3 terrain = terrainLayer(p, uv, a);
+    col = lerp(col, terrain, smoothstep(0.0, 1.0, length(terrain) * 2.0));
+    col = blendScreen(col, foregroundLayer(p, uv, a));
 
-    // Ambient center glow — bass driven
-    float ambientGlow = exp(-r * r * 3.0) * (0.02 + a.profBass * 0.04);
-    col += a.brainCol * ambientGlow * (1.0 - a.isSilent);
+    // ── Standard overlays — beat/kick/transient/phrase/section brightness events ──
+    // This handles: beat shockwave, kick ring, effect burst, section flash,
+    // phrase pulse (16-beat), ambient glow, global brightness (speech-aware)
+    col += standardOverlays(p, r, a) * 0.3;
 
-    // ── Sonar range rings — concentric circles with labels ──
-    [unroll] for (int ri = 1; ri <= 4; ri++) {
-        float ringR = ri * 0.32;
-        float ringDist = abs(r - ringR);
-        float ringGlow = exp(-ringDist * ringDist * 2500.0) * 0.4;
-        col += float3(0.015, 0.04, 0.025) * ringGlow * (1.0 - a.isSilent);
-    }
-
-    // ── Sonar crosshairs — cardinal directions ──
-    float angDist0 = min(abs(ang), abs(abs(ang) - 3.14159));
-    float angDist90 = abs(abs(ang) - 1.5708);
-    float crosshair = min(angDist0, angDist90);
-    col += float3(0.015, 0.04, 0.02) * exp(-crosshair * crosshair * 150.0) * exp(-r * r * 2.5) * 0.25 * (1.0 - a.isSilent);
-
-    // ── Spectrum sonar bins — filled bars with gradient ──
-    [loop] for (int bi = 0; bi < RADAR_BINS; bi++) {
-        AudioElement e = audioSimElement(bi, RADAR_BINS, a);
-
-        float binAng = (float(bi) / RADAR_BINS) * 6.28318 - 3.14159;
-        float angDiff = abs(ang - binAng);
-        angDiff = min(angDiff, 6.28318 - angDiff);
-
-        float barInner = 0.06;
-        float barOuter = 0.06 + e.amplitude * 0.55 * a.barScale;
-        float angWidth = 6.28318 / RADAR_BINS * 0.85;
-
-        if (angDiff < angWidth && r > barInner && r < barOuter) {
-            float rf = (r - barInner) / max(barOuter - barInner, 0.001);
-            float angFade = 1.0 - angDiff / angWidth;
-
-            // Frequency gradient color
-            float hue = a.hueBase + e.freqFrac * a.hueRange;
-            float3 binCol = hsv(hue, 0.7 * a.satur, 0.7 + rf * 0.3);
-            binCol = lerp(binCol, a.brainCol, 0.2);
-            binCol = lerp(binCol, a.brainCol2, e.pan * 0.5 + 0.5);
-
-            // Filled bar with angular falloff
-            float barIntensity = angFade * (0.3 + e.intensity * 0.5);
-            col += binCol * barIntensity * (1.0 - a.isSilent);
-
-            // Bright tip on bar
-            float tipGlow = smoothstep(0.8, 1.0, rf) * e.amplitude * 0.4 * angFade;
-            col += binCol * tipGlow * a.bloomActive * (1.0 - a.isSilent);
-
-            // Inner edge glow
-            float innerEdge = smoothstep(0.0, 0.1, rf) * smoothstep(0.2, 0.0, rf) * angFade * 0.15;
-            col += binCol * innerEdge * (1.0 - a.isSilent);
-        }
-
-        // L/R lobes — separate L and R amplitude as glowing dots
-        float2 lobePosL = float2(cos(binAng), sin(binAng)) * (0.12 + e.ampL * 0.45);
-        float2 lobePosR = float2(cos(binAng), sin(binAng)) * (0.12 + e.ampR * 0.45);
-        float lobeDistL = length(p - lobePosL);
-        float lobeDistR = length(p - lobePosR);
-        col += a.brainCol * exp(-lobeDistL * lobeDistL * 200.0) * e.ampL * 0.12 * (1.0 - a.isSilent);
-        col += a.brainCol2 * exp(-lobeDistR * lobeDistR * 200.0) * e.ampR * 0.12 * (1.0 - a.isSilent);
-    }
-
-    // ── Sonar sweep — rotating with persistence trail ──
-    float sweepAng = Time * 0.4 * a.motSpeed;
-    float sweepDiff = abs(ang - sweepAng);
-    sweepDiff = min(sweepDiff, 6.28318 - sweepDiff);
-
-    // Main sweep line
-    float sweepGlow = exp(-sweepDiff * sweepDiff * 100.0) * 0.12;
-    col += float3(0.2, 0.6, 0.4) * sweepGlow * a.dynActive * (1.0 - a.isSilent);
-
-    // Persistence trail — fading wedge behind sweep
-    float trailDiff = atan2(sin(sweepAng - ang), cos(sweepAng - ang));
-    if (trailDiff > 0.0 && trailDiff < 1.5) {
-        float trailFade = exp(-trailDiff * 2.5);
-        float trailWidth = smoothstep(1.5, 0.0, trailDiff);
-        col += float3(0.08, 0.3, 0.15) * trailFade * trailWidth * 0.03 * a.dynActive * (1.0 - a.isSilent);
-    }
-
-    // ── Beat rings — expanding from center on beat ──
-    float beatRingR = a.beat * 0.65 * a.tempoConf;
-    float beatRing = exp(-abs(r - beatRingR) * 12.0) * a.beat * 0.2;
-    col += a.brainCol2 * beatRing * a.bloomActive * (1.0 - a.isSilent);
-
-    // Secondary beat ring — delayed
-    float beatRingR2 = a.beat * 0.4 * a.tempoConf;
-    float beatRing2 = exp(-abs(r - beatRingR2) * 18.0) * a.beat * 0.1;
-    col += a.brainCol * beatRing2 * (1.0 - a.isSilent);
-
-    // ── Kick flash — center burst ──
-    float kickGlow = exp(-r * r * 12.0) * a.kick * 0.25 * a.kickConf;
-    col += hsv(a.hueCenter, 0.3, 1.0) * kickGlow * a.bloomActive * (1.0 - a.isSilent);
-
-    // ── Transient contacts — random radar blips ──
-    if (a.transient > 0.2) {
-        float blipN = hash11(floor(uv.x * 80.0) + floor(uv.y * 80.0) + floor(Time * 15.0));
-        if (blipN > 0.93) {
-            float blipDist = length(p - float2(hash11(blipN) * 1.5 - 0.75, hash11(blipN * 2.0) * 1.5 - 0.75));
-            float blipGlow = exp(-blipDist * blipDist * 400.0) * a.transient * 0.25;
-            col += float3(0.3, 0.8, 0.5) * blipGlow * (1.0 - a.isSilent);
-            // Blip ring
-            float blipRing = exp(-abs(blipDist - 0.03) * 200.0) * a.transient * 0.1;
-            col += float3(0.2, 0.6, 0.4) * blipRing * (1.0 - a.isSilent);
-        }
-    }
-
-    // ── Center — bass pulse core ──
-    float bassPulse = exp(-r * r * 40.0) * (0.04 + a.profBass * 0.15);
-    col += a.brainCol * bassPulse * (1.0 - a.isSilent);
-    float bassCore = exp(-r * r * 100.0) * a.b0 * 0.2;
-    col += float3(0.6, 0.8, 1.0) * bassCore * a.bloomActive * (1.0 - a.isSilent);
-
-    // ── Foreground overlays ──
-    col += standardOverlays(p, r, a) * 0.25;
+    // ── Brightness limiter — match other modes (HDR headroom at 1.2) ──
+    float maxCh = max(col.r, max(col.g, col.b));
+    if (maxCh > 1.2) col *= 1.2 / maxCh;
 
     // ── Post-processing ──
-    // ── Brightness limiter — prevent bloom blowout ──
-    float maxChannel = max(col.r, max(col.g, col.b));
-    if (maxChannel > 1.2) col *= 1.2 / maxChannel;
-
     col = applyPostFX(col, uv, a);
     return float4(col, 1.0);
 }

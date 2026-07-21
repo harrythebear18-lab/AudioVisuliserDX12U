@@ -72,6 +72,7 @@ namespace StageSimWASAPI
             public float SectionHueRange;
             public float ColorR, ColorG, ColorB;
             public float Color2R, Color2G, Color2B;
+            public float Color3R, Color3G, Color3B;
 
             // Rhythm / phrase
             public int BeatCount;
@@ -126,6 +127,27 @@ namespace StageSimWASAPI
             public float ProfilePerspective;   // 0-1 depth effect strength
             public int ProfileDominantSection; // most common section
             public float ProfileDuration;      // song duration in seconds
+
+            // Resonance DSP — professional audio analysis (LUFS, THD, phase, crest factor)
+            public float MomentaryLUFS;        // EBU R128 momentary loudness (LUFS)
+            public float ShortTermLUFS;        // EBU R128 short-term loudness (LUFS)
+            public float IntegratedLUFS;       // EBU R128 integrated loudness (LUFS)
+            public float THDPercentage;        // Total Harmonic Distortion (%)
+            public float PhaseCorrelationDSP;  // -1 to +1, from Resonance PhaseCorrelator
+            public float PeakDbL;              // Peak level left channel (dB)
+            public float PeakDbR;              // Peak level right channel (dB)
+            public float RmsDbL;               // RMS level left channel (dB)
+            public float RmsDbR;               // RMS level right channel (dB)
+            public float CrestFactorDbL;       // Crest factor left (dB) — headroom indicator
+            public float CrestFactorDbR;       // Crest factor right (dB)
+            public float DspBand0;             // Biquad band-pass levels (8 bands)
+            public float DspBand1;
+            public float DspBand2;
+            public float DspBand3;
+            public float DspBand4;
+            public float DspBand5;
+            public float DspBand6;
+            public float DspBand7;
         }
 
         private readonly VisualFrame[] _frames;

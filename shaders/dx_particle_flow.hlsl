@@ -10,117 +10,84 @@
 #include "include/postfx.hlsl"
 #include "include/layers.hlsl"
 
-#define VORTEX_BINS 48
+#include "include/dsp_cb.hlsl"
 
-float2 vortexParticlePos(int idx, int total, AudioData a, float depth, float layerRot) {
-    AudioElement e = audioSimElement(idx, total, a);
+#define SPECTRAL_RAYS 96
 
-    // Base angle — distribute around circle, with layer rotation
-    float baseAng = (float(idx) / total) * 6.28318 + layerRot;
-
-    // Radial position — amplitude pushes outward, silence pulls inward
-    float baseR = 0.3 + depth * 0.2;
-    float radial = baseR + e.amplitude * 0.5 * a.barScale;
-
-    // Beat contracts particles inward momentarily
-    radial -= a.beat * 0.1 * a.tempoConf;
-
-    // Kick pushes outward
-    radial += a.kick * 0.15 * a.kickConf;
-
-    // Stereo pan shifts X position
-    float2 pos = float2(cos(baseAng), sin(baseAng)) * radial;
-    pos += e.panOffset;
-
-    // Transient scatter
-    pos += float2(e.transientScatter, e.transientScatter * 0.5);
-
-    // Depth scaling
-    pos *= (0.7 + depth * 0.3);
-
-    return pos;
+float rayDistance(float2 p, float2 a, float2 b, out float h) {
+    float2 ab = b - a;
+    h = saturate(dot(p - a, ab) / max(dot(ab, ab), 0.0001));
+    return length(p - (a + ab * h));
 }
 
 float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
     AudioData a = extractAudio();
-    float2 p = screenToAspect(uv);
-    float r = length(p);
+    float virtualCameraZoom = 0.86 + a.envelope * 0.025 + a.kick * a.kickConf * 0.035;
+    float2 p = screenToAspect(uv) / virtualCameraZoom;
+    float lufs = lufsNormalized();
+    float crest = crestFactorNormalized();
+    float coherence = phaseCoherence();
+    float thd = thdNormalized();
+    float silence = 1.0 - a.isSilent;
+    float time = Time * (0.08 + a.motSpeed * 0.06);
+    float depthPulse = a.kick * a.kickConf * 0.14 - a.beat * a.tempoConf * 0.05;
+    float2 aperture = float2(a.stereoBal * 0.045, -0.015);
+    float3 col = float3(0.002, 0.003, 0.010) * silence;
+    col += starfield(uv, a) * 0.07;
 
-    // ── Background ──
-    float3 col = float3(0.008, 0.006, 0.015) * (1.0 - a.isSilent * 0.98);
-    col += starfield(uv, a) * 0.2;
+    [loop] for (int i = 0; i < SPECTRAL_RAYS; i++) {
+        float rayT = float(i) / float(SPECTRAL_RAYS - 1);
+        float frequencyU = saturate(20.0 * pow(1200.0, rayT) / 24000.0);
+        float ampL = u_spectrum.SampleLevel(u_sampler, float2(frequencyU, 0.166), 0).r;
+        float ampR = u_spectrum.SampleLevel(u_sampler, float2(frequencyU, 0.833), 0).r;
+        float monoBass = u_spectrum.SampleLevel(u_sampler, float2(frequencyU, 0.5), 0).r;
+        float sharedBass = 1.0 - smoothstep(0.0, 0.05, rayT);
+        ampL = lerp(ampL, monoBass, sharedBass);
+        ampR = lerp(ampR, monoBass, sharedBass);
 
-    // ── 3 particle depth layers ──
-    [unroll] for (int layer = 0; layer < 3; layer++) {
-        float depth = layer / 2.0;
-        float layerBright = 0.3 + depth * 0.7;
-        float pSize = 0.015 + depth * 0.01;
-        float layerRot = Time * (0.1 + layer * 0.05) * a.motSpeed;
+        float fanAngle = lerp(-1.78, 1.78, rayT);
+        float2 directions[2] = {
+            float2(-cos(fanAngle), sin(fanAngle)),
+            float2(cos(fanAngle), sin(fanAngle))
+        };
+        float amplitudes[2] = { ampL, ampR };
 
-        // Render each particle
-        [loop] for (int bi = 0; bi < VORTEX_BINS; bi++) {
-            AudioElement e = audioSimElement(bi, VORTEX_BINS, a);
-            float2 partPos = vortexParticlePos(bi, VORTEX_BINS, a, depth, layerRot);
-
-            float dist = length(p - partPos);
-            float glow = exp(-dist * dist / (pSize * pSize * 3.0)) * layerBright;
-
-            // Color by frequency position + stereo pan
-            float3 pCol = lerp(a.brainCol, a.brainCol2, e.freqFrac);
-            float hue = a.hueBase + e.freqFrac * a.hueRange;
-            pCol = lerp(pCol, hsv(hue, 0.6 * a.satur, 0.9), 0.3);
-
-            // Brightness driven by amplitude
-            col += pCol * glow * e.intensity * 0.4 * (1.0 - a.isSilent);
-
-            // Bright core for high-amplitude particles
-            float coreGlow = exp(-dist * dist * 200.0) * e.amplitude * 0.3;
-            col += pCol * coreGlow * a.bloomActive * (1.0 - a.isSilent);
-
-            // Phase-linked connections to adjacent bin
-            if (bi > 0 && layer == 1) {
-                float2 prevPos = vortexParticlePos(bi - 1, VORTEX_BINS, a, depth, layerRot);
-                float2 segDir = partPos - prevPos;
-                float segLen = length(segDir);
-                if (segLen < 0.001) continue;
-                float2 segNorm = segDir / segLen;
-                float segProj = clamp(dot(p - prevPos, segNorm), 0.0, segLen);
-                float2 segClosest = prevPos + segNorm * segProj;
-                float segDist = length(p - segClosest);
-
-                float linkStrength = audioSimLink(
-                    audioSimElement(bi - 1, VORTEX_BINS, a),
-                    e, a.phaseCorr);
-                float linkGlow = exp(-segDist * segDist * 300.0) * linkStrength * 0.08;
-                col += a.brainCol2 * linkGlow * (1.0 - a.isSilent);
-            }
+        [unroll] for (int side = 0; side < 2; side++) {
+            float amplitude = amplitudes[side];
+            float lowWeight = 1.0 - smoothstep(0.0, 0.32, rayT);
+            float innerRadius = 0.115 + lowWeight * 0.055 - a.beat * 0.018;
+            float rayLength = 0.36 + amplitude * (1.02 + lufs * 0.28) + depthPulse;
+            rayLength += 0.07 * sin(time * (1.0 + rayT) + rayT * 23.0 + side * 1.7) * (0.15 + amplitude);
+            float2 rayStart = aperture + directions[side] * innerRadius;
+            float2 rayEnd = aperture + directions[side] * (innerRadius + rayLength);
+            float alongRay;
+            float distanceToRay = rayDistance(p, rayStart, rayEnd, alongRay);
+            float width = lerp(0.0022, 0.0048, amplitude) * lerp(1.15, 0.72, crest);
+            float body = exp(-distanceToRay * distanceToRay / max(width * width, 0.000001));
+            float tipWidth = width * (1.8 + a.transient * 1.3);
+            float tip = exp(-distanceToRay * distanceToRay / max(tipWidth * tipWidth, 0.000001));
+            tip *= smoothstep(0.78, 0.98, alongRay);
+            float segment = pow(saturate(sin((alongRay * 10.0 - time * 5.0) * 3.14159)), 14.0);
+            float hue = frac(0.98 - rayT * 0.86 + a.hueBase * 0.08 + thd * 0.025);
+            float3 rayColor = hsv(hue, 0.82, 1.0);
+            rayColor = lerp(rayColor, lerp(a.brainCol, a.brainCol2, rayT), 0.14);
+            float rayEnergy = 0.08 + amplitude * (0.82 + a.brightness * 0.18);
+            col += rayColor * body * rayEnergy * silence;
+            col += rayColor * tip * (0.10 + amplitude * 0.72 + a.transient * 0.25) * silence;
+            col += rayColor * segment * tip * a.transient * 0.32 * silence;
         }
     }
 
-    // ── Kick shockwave — radial ring from center ──
-    float kickR = a.kick * 0.4 * a.kickConf;
-    float kickRing = exp(-abs(r - kickR) * 20.0) * a.kick * 0.2 * a.kickConf;
-    col += a.brainCol * kickRing * (1.0 - a.isSilent);
+    float2 apertureShape = (p - aperture) / float2(0.245 + a.b0 * 0.045, 0.112 + a.b1 * 0.025);
+    float apertureMask = 1.0 - smoothstep(0.88, 1.08, length(apertureShape));
+    float rim = smoothstep(1.14, 0.94, length(apertureShape)) * (1.0 - apertureMask);
+    col += hsv(a.hueCenter + 0.1, 0.38, 1.0) * rim * (0.02 + a.beat * 0.08) * silence;
+    col *= 1.0 - apertureMask;
 
-    // ── Beat flash — center contraction glow ──
-    float beatGlow = exp(-r * r * 8.0) * a.beat * 0.15 * a.tempoConf;
-    col += a.brainCol2 * beatGlow * a.bloomActive * (1.0 - a.isSilent);
-
-    // ── Transient sparks ──
-    if (a.transient > 0.2) {
-        float sparkN = hash21(floor(p * 30.0) + floor(Time * 20.0));
-        float sparks = step(0.96, sparkN) * a.transient * 0.2;
-        col += float3(0.9, 0.95, 1.0) * sparks * a.beamActive * (1.0 - a.isSilent);
-    }
-
-    // ── Foreground overlays ──
-    col += standardOverlays(p, r, a) * 0.3;
-
-    // ── Post-processing ──
-    // ── Brightness limiter — prevent bloom blowout ──
-    float maxChannel = max(col.r, max(col.g, col.b));
-    if (maxChannel > 1.2) col *= 1.2 / maxChannel;
-
-    col = applyPostFX(col, uv, a);
+    float2 toAperture = p - aperture;
+    float apertureRadius = length(toAperture);
+    float shock = exp(-abs(apertureRadius - (0.30 + a.kick * 0.20)) * 30.0);
+    col += a.brainCol * shock * a.kick * a.kickConf * 0.06 * silence;
+    col += standardOverlays(p, length(p), a) * 0.08;
     return float4(col, 1.0);
 }

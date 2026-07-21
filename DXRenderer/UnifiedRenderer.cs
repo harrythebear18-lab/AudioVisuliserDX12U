@@ -173,6 +173,7 @@ public class UnifiedRenderer : IRenderer, IDisposable
         if (_dx12Available && _dx12 != null) _dx12.SetMode(name);
     }
     public void ToggleHUD() => _dx11.ToggleHUD();
+    public void ToggleSkiaOverlay() => _dx12?.ToggleSkiaOverlay();
     public void ResetGPU()
     {
         _dx12?.ResetGPU();

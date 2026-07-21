@@ -2,6 +2,7 @@
 // Each cell = a spectrum bin, height + brightness = amplitude, L/R stereo split
 // Holographic styling: scan lines, glitch, flicker, perspective tilt, applyPostFX
 #include "include/audio_cb.hlsl"
+#include "include/dsp_cb.hlsl"
 #include "include/color_utils.hlsl"
 #include "include/noise.hlsl"
 #include "include/audio_reactive.hlsl"
@@ -23,6 +24,11 @@ float2 gridToScreen(int col, int row, int cols, int rows, float tilt, float ster
 float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
     AudioData a = extractAudio();
     float2 p = screenToAspect(uv);
+
+    // DSP complement — additive to brain data, never replaces
+    float lufs = lufsNormalized();
+    float thd = thdNormalized();
+    float phase = phaseCoherence();  // 0=out-of-phase, 1=mono
 
     // ── Background — holographic dark ──
     float3 col = float3(0.003, 0.006, 0.012) * (1.0 - a.isSilent * 0.98);
@@ -120,6 +126,8 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
             cellCol = lerp(a.brainCol, cellCol, 0.6);
 
             col += cellCol * (cellGlow + barGlow) * rowFade * (0.5 + a.brightness * 0.5) * (1.0 - a.isSilent);
+            // LUFS: louder = brighter cells (additive boost to brain brightness)
+            col += cellCol * (cellGlow + barGlow) * rowFade * lufs * 0.15 * (1.0 - a.isSilent);
 
             // Bright top cap on tall bars
             if (barLen > 0.01) {
@@ -130,8 +138,9 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
         }
     }
 
-    // ── Holographic scan lines (screen space) ──
-    float holoScan = sin(uv.y * Height * 0.5) * 0.5 + 0.5;
+    // ── Holographic scan lines (screen space) — phase splits scan channels ──
+    float scanSplit = (1.0 - phase) * 0.5;  // stereo = wider scan separation
+    float holoScan = sin(uv.y * Height * 0.5 + scanSplit * 10.0) * 0.5 + 0.5;
     col *= (0.85 + holoScan * 0.15);
 
     // Moving scan bar
@@ -139,12 +148,12 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
     float scanDist = abs(p.y - scanY);
     col += a.brainCol2 * exp(-scanDist * scanDist * 60.0) * 0.08 * a.dynActive * (1.0 - a.isSilent);
 
-    // ── Glitch on transient ──
+    // ── Glitch on transient — THD amplifies glitch intensity ──
     if (a.transient > 0.3) {
-        float glitchShift = a.transient * 0.015;
+        float glitchShift = a.transient * 0.015 * (1.0 + thd * 0.8);  // THD: more distortion = bigger glitch
         col.r *= (1.0 + glitchShift);
         col.b *= (1.0 - glitchShift);
-        float glitchBlock = step(0.97, hash11(floor(uv.y * 30.0) + floor(Time * 8.0)));
+        float glitchBlock = step(0.97 - thd * 0.04, hash11(floor(uv.y * 30.0) + floor(Time * 8.0)));  // THD: more glitch blocks
         col += a.brainCol * glitchBlock * a.transient * 0.1 * (1.0 - a.isSilent);
     }
 

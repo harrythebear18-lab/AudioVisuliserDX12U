@@ -51,6 +51,9 @@ public interface IRenderer : IDisposable
     /// <summary>Toggle the brain HUD overlay on/off.</summary>
     void ToggleHUD();
 
+    /// <summary>Toggle the SkiaSharp 2D overlay (particles/glow/meters) on/off.</summary>
+    void ToggleSkiaOverlay();
+
     /// <summary>Update the audio constant buffer + spectrum texture from CPU data.</summary>
     /// <param name="ubo">The audio UBO struct — same layout for all backends.</param>
     /// <param name="spectrum">Up to 1024 float spectrum bins.</param>
@@ -97,9 +100,10 @@ public struct AudioUBO
     public float Conf;
     public float KickWeight;
     public float MoveSpeed;
-    // Shader Control Multipliers (64 bytes)
-    public Vector4 ColorPrimary;
-    public Vector4 ColorSecondary;
+    // Shader Control Multipliers (80 bytes)
+    public Vector4 ColorPrimary;    // xyz = RGB, w = hueBase
+    public Vector4 ColorSecondary;  // xyz = RGB2, w = hueCenter
+    public Vector4 ColorTertiary;   // xyz = RGB3 (blender), w = hueRange
     public Vector4 VisualModifiers;
     public Vector4 SystemState;
 }

@@ -127,7 +127,7 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
     float3 colTop = float3(0,0,0);
     float3 colBot = float3(0,0,0);
 
-    // ── BOTTOM: Sub-bass audio tessellation — mass at bottom edge, converges up to center ──
+    // ── BOTTOM: Highs audio tessellation — mass at top edge, converges down to center ──
     if (botWeight > 0.01) {
         float2 pBot = screenToAspect(uv);
 
@@ -136,71 +136,6 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
         float camAng = a.stereoBal * 0.15;
         float3 camPos = float3(sin(camAng) * 4.0, 2.5, cos(camAng) * 4.0);
         float3 rd = cameraRay(camPos, float3(0, 0, 0), pBot, 1.0);
-
-        float t = 0.05;
-        float marchGlow = 0.0;
-        float steps = 0.0;
-        bool hit = false;
-
-        [loop] for (int i = 0; i < 48; i++) {
-            float3 sp = camPos + rd * t;
-            float d = sceneBassSDF(sp, a);
-            marchGlow += 0.01 / (1.0 + d * d * 80.0);
-            steps += 1.0;
-            if (d < 0.001) { hit = true; break; }
-            t += d * 0.6;
-            if (t > 10.0) break;
-        }
-        float ao = 1.0 - steps / 48.0 * 0.5;
-
-        if (hit) {
-            float3 hp = camPos + rd * t;
-            float3 n = calcNormalBass(hp, a);
-
-            float3 lDir = normalize(float3(0.5, 1.0, 0.3));
-            float3 lDir2 = normalize(float3(-1.0 + a.stereoBal, 0.5, 0.3));
-            float diff = max(dot(n, lDir), 0.0);
-            float diff2 = max(dot(n, lDir2), 0.0) * 0.5;
-            float spec = pow(max(dot(reflect(-lDir, n), -rd), 0.0), 64.0);
-            float fres = pow(1.0 - max(dot(n, -rd), 0.0), 4.0);
-
-            float heightFrac = clamp(hp.y * 2.0 + 0.3, 0.0, 1.0);
-            float3 baseCol = lerp(float3(0.3, 0.1, 0.0), float3(0.8, 0.4, 0.05), heightFrac);
-            float3 litCol = baseCol * (diff + diff2) * (0.4 + a.brightness * 0.3);
-            litCol += float3(1.0, 0.9, 0.7) * spec * 0.4 * a.dynLight;
-            litCol += float3(0.6, 0.2, 0.0) * fres * (0.2 + a.b0 * 0.3);
-            litCol *= ao * (0.4 + a.ambient * 0.6);
-
-            float2 cellSize = float2(0.4, 0.4);
-            float2 cellUV = hp.xz / cellSize;
-            float2 cellId = abs(frac(cellUV) - 0.5);
-            float voronoiEdge = smoothstep(0.45, 0.5, max(cellId.x, cellId.y));
-            litCol += float3(1.0, 0.6, 0.1) * voronoiEdge * 0.1 * a.brightness;
-
-            float faultAngle = Time * 0.1 * a.motSpeed * 0.5;
-            float2 faultDir = float2(cos(faultAngle), sin(faultAngle));
-            float faultDist = abs(dot(hp.xz, faultDir));
-            float faultGlow = exp(-faultDist * faultDist * 10.0) * a.kick * 0.2 * a.kickConf;
-            litCol += float3(1.0, 0.3, 0.0) * faultGlow * (1.0 - a.isSilent);
-
-            col = blendScreen(col, litCol);
-        }
-
-        col += float3(0.1, 0.04, 0.0) * marchGlow * 0.04 * (1.0 - a.isSilent);
-        col = col / (1.0 + col);
-        colBot = col;
-    }
-
-    // ── TOP: Highs audio tessellation — mass at top edge, converges down to center ──
-    if (topWeight > 0.01) {
-        float2 pTop = screenToAspect(uv);
-        float2 pFlip = float2(pTop.x, -pTop.y);
-
-        float3 col = float3(0.02, 0.008, 0.0);
-
-        float camAng = a.stereoBal * 0.15;
-        float3 camPos = float3(sin(camAng) * 4.0, 2.5, cos(camAng) * 4.0);
-        float3 rd = cameraRay(camPos, float3(0, 0, 0), pFlip, 1.0);
 
         float t = 0.05;
         float marchGlow = 0.0;
@@ -246,6 +181,71 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
             float2 faultDir = float2(cos(faultAngle), sin(faultAngle));
             float faultDist = abs(dot(hp.xz, faultDir));
             float faultGlow = exp(-faultDist * faultDist * 10.0) * a.kick * 0.15 * a.kickConf;
+            litCol += float3(1.0, 0.3, 0.0) * faultGlow * (1.0 - a.isSilent);
+
+            col = blendScreen(col, litCol);
+        }
+
+        col += float3(0.1, 0.04, 0.0) * marchGlow * 0.04 * (1.0 - a.isSilent);
+        col = col / (1.0 + col);
+        colBot = col;
+    }
+
+    // ── TOP: Sub-bass audio tessellation — mass at bottom edge, converges up to center ──
+    if (topWeight > 0.01) {
+        float2 pTop = screenToAspect(uv);
+        float2 pFlip = float2(pTop.x, -pTop.y);
+
+        float3 col = float3(0.02, 0.008, 0.0);
+
+        float camAng = a.stereoBal * 0.15;
+        float3 camPos = float3(sin(camAng) * 4.0, 2.5, cos(camAng) * 4.0);
+        float3 rd = cameraRay(camPos, float3(0, 0, 0), pFlip, 1.0);
+
+        float t = 0.05;
+        float marchGlow = 0.0;
+        float steps = 0.0;
+        bool hit = false;
+
+        [loop] for (int i = 0; i < 48; i++) {
+            float3 sp = camPos + rd * t;
+            float d = sceneBassSDF(sp, a);
+            marchGlow += 0.01 / (1.0 + d * d * 80.0);
+            steps += 1.0;
+            if (d < 0.001) { hit = true; break; }
+            t += d * 0.6;
+            if (t > 10.0) break;
+        }
+        float ao = 1.0 - steps / 48.0 * 0.5;
+
+        if (hit) {
+            float3 hp = camPos + rd * t;
+            float3 n = calcNormalBass(hp, a);
+
+            float3 lDir = normalize(float3(0.5, 1.0, 0.3));
+            float3 lDir2 = normalize(float3(-1.0 + a.stereoBal, 0.5, 0.3));
+            float diff = max(dot(n, lDir), 0.0);
+            float diff2 = max(dot(n, lDir2), 0.0) * 0.5;
+            float spec = pow(max(dot(reflect(-lDir, n), -rd), 0.0), 64.0);
+            float fres = pow(1.0 - max(dot(n, -rd), 0.0), 4.0);
+
+            float heightFrac = clamp(hp.y * 2.0 + 0.3, 0.0, 1.0);
+            float3 baseCol = lerp(float3(0.3, 0.1, 0.0), float3(0.8, 0.4, 0.05), heightFrac);
+            float3 litCol = baseCol * (diff + diff2) * (0.4 + a.brightness * 0.3);
+            litCol += float3(1.0, 0.9, 0.7) * spec * 0.4 * a.dynLight;
+            litCol += float3(0.6, 0.2, 0.0) * fres * (0.2 + a.b0 * 0.3);
+            litCol *= ao * (0.4 + a.ambient * 0.6);
+
+            float2 cellSize = float2(0.4, 0.4);
+            float2 cellUV = hp.xz / cellSize;
+            float2 cellId = abs(frac(cellUV) - 0.5);
+            float voronoiEdge = smoothstep(0.45, 0.5, max(cellId.x, cellId.y));
+            litCol += float3(1.0, 0.6, 0.1) * voronoiEdge * 0.1 * a.brightness;
+
+            float faultAngle = Time * 0.1 * a.motSpeed * 0.5;
+            float2 faultDir = float2(cos(faultAngle), sin(faultAngle));
+            float faultDist = abs(dot(hp.xz, faultDir));
+            float faultGlow = exp(-faultDist * faultDist * 10.0) * a.kick * 0.2 * a.kickConf;
             litCol += float3(1.0, 0.3, 0.0) * faultGlow * (1.0 - a.isSilent);
 
             col = blendScreen(col, litCol);

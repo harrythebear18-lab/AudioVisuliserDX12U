@@ -76,6 +76,27 @@ public class DX12Renderer : IRenderer
     private ID3D12DescriptorHeap _bloomRtvHeap = null!;
     private bool _bloomEnabled = true;
 
+    // PostFX + Tone-map pipeline resources (multi-pass HDR compositing)
+    private ID3D12Resource _postfxTex = null!;
+    private ID3D12DescriptorHeap _postfxRtvHeap = null!;
+    private ID3D12PipelineState _postfxPSO = null!;
+    private ID3D12PipelineState _tonemapPSO = null!;
+
+    // SkiaSharp 2D overlay layer
+    private ID3D12Resource _skiaTex = null!;
+    private ID3D12Resource _skiaUploadBuffer = null!;
+    private IntPtr _skiaUploadPtr;
+    private uint _skiaUploadSize;
+    private ID3D12PipelineState _skiaPSO = null!;
+    private SkiaOverlay? _skiaOverlay;
+    private bool _skiaEnabled = true;
+    private AudioUBO _currentAudioUBO;
+
+    // Resonance DSP constant buffer (b2)
+    private ID3D12Resource _dspCB = null!;
+    private IntPtr _dspCBPtr;
+    private const int DSP_CB_SIZE = 64; // 16 floats = 64 bytes
+
     private ID3D12DescriptorHeap _cbvSrvUavHeap = null!;
     private ID3D12DescriptorHeap _samplerHeap = null!;
     private uint _srvDescriptorSize;
@@ -89,8 +110,8 @@ public class DX12Renderer : IRenderer
         { "plasma_field", "Plasma Field" },
         { "neon_pulse", "Neon Pulse" },
         { "particle_flow", "Particle Flow" },
-        { "waveform", "Spectrum Ribbons" },
-        { "sphere", "Spectrum Resonator" },
+        { "waveform", "Audio Lichtenberg" },
+        { "sphere", "Chladni Plate" },
         { "aurora", "Aurora Borealis" },
         { "dna_helix", "DNA Helix" },
         { "heartbeat", "Spectrum Singularity" },
@@ -415,6 +436,14 @@ public class DX12Renderer : IRenderer
             ResourceStates.GenericRead);
         unsafe { _timeCBPtr = new IntPtr(_timeCB.Map<byte>(0)); }
 
+        // DSP constant buffer (b2) — Resonance DSP metrics for shaders
+        uint dspCBSize = (uint)((DSP_CB_SIZE + 255) & ~255);
+        _dspCB = _device.CreateCommittedResource(
+            HeapType.Upload,
+            ResourceDescription.Buffer(dspCBSize),
+            ResourceStates.GenericRead);
+        unsafe { _dspCBPtr = new IntPtr(_dspCB.Map<byte>(0)); }
+
         // Spectrum texture on default heap + upload buffer for CPU→GPU copy
         // 3 rows: row 0 = left, row 1 = center, row 2 = right
         _spectrumTexture = _device.CreateCommittedResource(
@@ -461,6 +490,33 @@ public class DX12Renderer : IRenderer
             bloomRtvHandle1.Ptr += _rtvDescriptorSize;
             _device.CreateRenderTargetView(_bloomTexture2, null, bloomRtvHandle1);
         }
+
+        // PostFX HDR intermediate texture (full-res, same as layer textures)
+        _postfxTex = _device.CreateCommittedResource(
+            HeapType.Default,
+            ResourceDescription.Texture2D(Format.R16G16B16A16_Float, (uint)_width, (uint)_height,
+                flags: ResourceFlags.AllowRenderTarget),
+            ResourceStates.Common,
+            new ClearValue(Format.R16G16B16A16_Float, new Color4(0, 0, 0, 1)));
+        _postfxRtvHeap = _device.CreateDescriptorHeap(
+            new DescriptorHeapDescription(DescriptorHeapType.RenderTargetView, 1));
+        _device.CreateRenderTargetView(_postfxTex, null, _postfxRtvHeap.GetCPUDescriptorHandleForHeapStart());
+
+        // SkiaSharp 2D overlay texture (RGBA8, CPU-uploaded each frame)
+        _skiaTex = _device.CreateCommittedResource(
+            HeapType.Default,
+            ResourceDescription.Texture2D(Format.R8G8B8A8_UNorm, (uint)_width, (uint)_height),
+            ResourceStates.CopyDest);
+        _skiaUploadSize = (uint)(_width * _height * 4);
+        _skiaUploadSize = (_skiaUploadSize + 255) & ~255u; // 256-byte aligned
+        _skiaUploadBuffer = _device.CreateCommittedResource(
+            HeapType.Upload,
+            ResourceDescription.Buffer(_skiaUploadSize),
+            ResourceStates.GenericRead);
+        unsafe { _skiaUploadPtr = new IntPtr(_skiaUploadBuffer.Map<byte>(0)); }
+        // Initialize to transparent
+        unsafe { new Span<byte>((void*)_skiaUploadPtr, (int)_skiaUploadSize).Clear(); }
+        _skiaOverlay = new SkiaOverlay(_width, _height);
 
         // Fullscreen quad
         float[] quadVerts = {
@@ -526,6 +582,11 @@ public class DX12Renderer : IRenderer
         // Load composite + overlay shaders
         LoadCompositeShader(vsBytecode);
         LoadOverlayShader(vsBytecode);
+        // Load PostFX + Tone-map shaders (multi-pass HDR pipeline)
+        LoadPostFxShader(vsBytecode);
+        LoadToneMapShader(vsBytecode);
+        // Load SkiaSharp overlay composite shader
+        LoadSkiaShader(vsBytecode);
 
         // Fallback blit PSO if composite failed
         if (_compositePSO == null)
@@ -551,6 +612,11 @@ public class DX12Renderer : IRenderer
             }
         }
 
+        bool bloomReady = _bloomEnabled && _bloomExtractPSO != null && _bloomBlurHPSO != null && _bloomBlurVPSO != null && _bloomCombinePSO != null;
+        bool hdrPipelineReady = bloomReady && _postfxPSO != null && _tonemapPSO != null;
+        string fallbackState = _compositePSO == null ? "unavailable" : hdrPipelineReady ? "available (inactive)" : "active";
+        DebugLogger.Info($"[Pipeline] Startup validation: modes={_modeNames.Count}/30, bloom={(bloomReady ? "loaded" : "failed")}, postfx={(_postfxPSO != null ? "loaded" : "failed")}, tonemap={(_tonemapPSO != null ? "loaded" : "failed")}, overlay={(_overlayPSO != null ? "loaded" : "not configured")}, skia={(_skiaPSO != null && _skiaEnabled ? "loaded" : "disabled")}, fallback={fallbackState}");
+
         // Create SRV descriptors in the CBV/SRV/UAV heap
         // Layout (8 SRVs): [0]spectrum, [1]layer0, [2]layer1, [3]bloom0, [4]bloom1, [5]feedback0(null), [6]feedback1(null), [7]noise(null)
         var srvCpuHandle = _cbvSrvUavHeap.GetCPUDescriptorHandleForHeapStart();
@@ -570,7 +636,12 @@ public class DX12Renderer : IRenderer
         // t5: feedback texture (previous frame for simulation memory)
         srvCpuHandle += (int)_srvDescriptorSize;
         _device.CreateShaderResourceView(_feedbackTex0, null, srvCpuHandle);
-        // t6-t7: null SRVs (future use)
+        // t6: postfx HDR intermediate (for tonemap pass to read)
+        srvCpuHandle += (int)_srvDescriptorSize;
+        _device.CreateShaderResourceView(_postfxTex, null, srvCpuHandle);
+        // t7: SkiaSharp 2D overlay texture
+        srvCpuHandle += (int)_srvDescriptorSize;
+        _device.CreateShaderResourceView(_skiaTex, null, srvCpuHandle);
         // UAV descriptors at offset 8: u0-u3 (null for now, future compute use)
 
         // Create HUD
@@ -598,9 +669,11 @@ public class DX12Renderer : IRenderer
             new(RootParameterType.ConstantBufferView, new RootDescriptor1(0, 0), ShaderVisibility.All),
             // [1] CBV b1 — TimeCB
             new(RootParameterType.ConstantBufferView, new RootDescriptor1(1, 0), ShaderVisibility.All),
-            // [2] Descriptor Table — 8 SRVs (t0-t7): spectrum, layer0, layer1, bloom0, bloom1, feedback0, feedback1, noise
+            // [2] CBV b2 — DspCB (Resonance DSP: LUFS, THD, phase, crest factor, biquad bands)
+            new(RootParameterType.ConstantBufferView, new RootDescriptor1(2, 0), ShaderVisibility.All),
+            // [3] Descriptor Table — 8 SRVs (t0-t7): spectrum, layer0, layer1, bloom0, bloom1, feedback0, skiaTex, noise
             new(new RootDescriptorTable1 { Ranges = new[] { new DescriptorRange1(DescriptorRangeType.ShaderResourceView, 8, 0) } }, ShaderVisibility.Pixel),
-            // [3] Descriptor Table — 4 UAVs (u0-u3): compute output, particle buffer, history buffer, debug
+            // [4] Descriptor Table — 4 UAVs (u0-u3): compute output, particle buffer, history buffer, debug
             new(new RootDescriptorTable1 { Ranges = new[] { new DescriptorRange1(DescriptorRangeType.UnorderedAccessView, 4, 0) } }, ShaderVisibility.Pixel),
         };
 
@@ -1081,25 +1154,25 @@ public class DX12Renderer : IRenderer
         try
         {
             // Bloom extract
-            string extractSource = File.ReadAllText(Path.Combine(shaderDir, "dx_bloom_extract.hlsl"));
+            string extractSource = PreprocessIncludes(File.ReadAllText(Path.Combine(shaderDir, "dx_bloom_extract.hlsl")));
             var extractBytecode = CompileShader(extractSource, "main", "dx_bloom_extract.hlsl", "ps_6_6", "ps_5_0");
             _bloomExtractPSO = _device.CreateGraphicsPipelineState(CreatePSODesc(vsBytecode, extractBytecode, Format.R16G16B16A16_Float));
             DebugLogger.Info("[DX12] Bloom extract shader loaded");
 
             // Bloom blur H
-            string blurHSource = File.ReadAllText(Path.Combine(shaderDir, "dx_bloom_blur_h.hlsl"));
+            string blurHSource = PreprocessIncludes(File.ReadAllText(Path.Combine(shaderDir, "dx_bloom_blur_h.hlsl")));
             var blurHBytecode = CompileShader(blurHSource, "main", "dx_bloom_blur_h.hlsl", "ps_6_6", "ps_5_0");
             _bloomBlurHPSO = _device.CreateGraphicsPipelineState(CreatePSODesc(vsBytecode, blurHBytecode, Format.R16G16B16A16_Float));
             DebugLogger.Info("[DX12] Bloom blur H shader loaded");
 
             // Bloom blur V
-            string blurVSource = File.ReadAllText(Path.Combine(shaderDir, "dx_bloom_blur_v.hlsl"));
+            string blurVSource = PreprocessIncludes(File.ReadAllText(Path.Combine(shaderDir, "dx_bloom_blur_v.hlsl")));
             var blurVBytecode = CompileShader(blurVSource, "main", "dx_bloom_blur_v.hlsl", "ps_6_6", "ps_5_0");
             _bloomBlurVPSO = _device.CreateGraphicsPipelineState(CreatePSODesc(vsBytecode, blurVBytecode, Format.R16G16B16A16_Float));
             DebugLogger.Info("[DX12] Bloom blur V shader loaded");
 
             // Bloom combine
-            string combineSource = File.ReadAllText(Path.Combine(shaderDir, "dx_bloom_combine.hlsl"));
+            string combineSource = PreprocessIncludes(File.ReadAllText(Path.Combine(shaderDir, "dx_bloom_combine.hlsl")));
             var combineBytecode = CompileShader(combineSource, "main", "dx_bloom_combine.hlsl", "ps_6_6", "ps_5_0");
             _bloomCombinePSO = _device.CreateGraphicsPipelineState(CreatePSODesc(vsBytecode, combineBytecode, Format.R16G16B16A16_Float));
             DebugLogger.Info("[DX12] Bloom combine shader loaded");
@@ -1357,6 +1430,153 @@ public class DX12Renderer : IRenderer
         }
     }
 
+    private void LoadPostFxShader(ReadOnlySpan<byte> vsBytecode)
+    {
+        string[] searchPaths = {
+            Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "shaders"),
+            Path.Combine(AppContext.BaseDirectory, "shaders"),
+            @"C:\Users\htsou\CascadeProjects\RTXAudioVisualizer\shaders",
+        };
+
+        string shaderDir = "";
+        foreach (var p in searchPaths)
+        {
+            if (Directory.Exists(p)) { shaderDir = p; break; }
+        }
+
+        string postfxPath = Path.Combine(shaderDir, "dx_postfx.hlsl");
+        if (!File.Exists(postfxPath))
+        {
+            DebugLogger.Warn("[DX12Renderer] PostFX shader not found");
+            return;
+        }
+
+        try
+        {
+            string source = File.ReadAllText(postfxPath);
+            source = PreprocessIncludes(source);
+            var psBytecode = CompileShader(source, "main", "dx_postfx.hlsl", "ps_6_6", "ps_5_0");
+            var psoDesc = CreatePSODesc(vsBytecode, psBytecode, Format.R16G16B16A16_Float);
+            _postfxPSO = _device.CreateGraphicsPipelineState(psoDesc);
+            DebugLogger.Info("[DX12U] PostFX shader loaded (DXC ps_6_6)");
+        }
+        catch (Exception e)
+        {
+            DebugLogger.Error($"[DX12U] PostFX shader failed: {e.Message}");
+        }
+    }
+
+    private void LoadToneMapShader(ReadOnlySpan<byte> vsBytecode)
+    {
+        string[] searchPaths = {
+            Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "shaders"),
+            Path.Combine(AppContext.BaseDirectory, "shaders"),
+            @"C:\Users\htsou\CascadeProjects\RTXAudioVisualizer\shaders",
+        };
+
+        string shaderDir = "";
+        foreach (var p in searchPaths)
+        {
+            if (Directory.Exists(p)) { shaderDir = p; break; }
+        }
+
+        string tonemapPath = Path.Combine(shaderDir, "dx_tonemap.hlsl");
+        if (!File.Exists(tonemapPath))
+        {
+            DebugLogger.Warn("[DX12Renderer] Tone-map shader not found");
+            return;
+        }
+
+        try
+        {
+            string source = File.ReadAllText(tonemapPath);
+            source = PreprocessIncludes(source);
+            var psBytecode = CompileShader(source, "main", "dx_tonemap.hlsl", "ps_6_6", "ps_5_0");
+            var psoDesc = CreatePSODesc(vsBytecode, psBytecode, Format.R8G8B8A8_UNorm);
+            _tonemapPSO = _device.CreateGraphicsPipelineState(psoDesc);
+            DebugLogger.Info("[DX12U] Tone-map shader loaded (DXC ps_6_6)");
+        }
+        catch (Exception e)
+        {
+            DebugLogger.Error($"[DX12U] Tone-map shader failed: {e.Message}");
+        }
+    }
+
+    private void LoadSkiaShader(ReadOnlySpan<byte> vsBytecode)
+    {
+        string[] searchPaths = {
+            Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "shaders"),
+            Path.Combine(AppContext.BaseDirectory, "shaders"),
+            @"C:\Users\htsou\CascadeProjects\RTXAudioVisualizer\shaders",
+        };
+
+        string shaderDir = "";
+        foreach (var p in searchPaths)
+        {
+            if (Directory.Exists(p)) { shaderDir = p; break; }
+        }
+
+        string skiaPath = Path.Combine(shaderDir, "dx_skia_composite.hlsl");
+        if (!File.Exists(skiaPath))
+        {
+            DebugLogger.Warn("[DX12Renderer] Skia composite shader not found");
+            return;
+        }
+
+        try
+        {
+            string source = File.ReadAllText(skiaPath);
+            source = PreprocessIncludes(source);
+            var psBytecode = CompileShader(source, "main", "dx_skia_composite.hlsl", "ps_6_6", "ps_5_0");
+
+            // Create PSO with premultiplied alpha blend state
+            var blendDesc = new BlendDescription
+            {
+                AlphaToCoverageEnable = false,
+                IndependentBlendEnable = false,
+            };
+            blendDesc.RenderTarget[0] = new RenderTargetBlendDescription
+            {
+                BlendEnable = true,
+                SourceBlend = Blend.One,                    // premultiplied src
+                DestinationBlend = Blend.InverseSourceAlpha,
+                BlendOperation = BlendOperation.Add,
+                SourceBlendAlpha = Blend.One,
+                DestinationBlendAlpha = Blend.InverseSourceAlpha,
+                BlendOperationAlpha = BlendOperation.Add,
+                RenderTargetWriteMask = ColorWriteEnable.All,
+            };
+
+            var psoDesc = new GraphicsPipelineStateDescription
+            {
+                RootSignature = _rootSignature,
+                VertexShader = vsBytecode.ToArray(),
+                PixelShader = psBytecode.ToArray(),
+                InputLayout = new InputLayoutDescription(new InputElementDescription[]
+                {
+                    new InputElementDescription("POSITION", 0, Format.R32G32B32_Float, 0, 0, InputClassification.PerVertexData, 0),
+                    new InputElementDescription("TEXCOORD", 0, Format.R32G32B32_Float, 12, 0, InputClassification.PerVertexData, 0),
+                }),
+                SampleMask = uint.MaxValue,
+                PrimitiveTopologyType = PrimitiveTopologyType.Triangle,
+                RasterizerState = RasterizerDescription.CullNone,
+                BlendState = blendDesc,
+                DepthStencilState = new DepthStencilDescription { DepthEnable = false, DepthWriteMask = DepthWriteMask.All, StencilEnable = false },
+                RenderTargetFormats = new Format[] { Format.R8G8B8A8_UNorm },
+                SampleDescription = new SampleDescription(1, 0),
+                NodeMask = 0,
+                CachedPSO = default,
+                Flags = PipelineStateFlags.None,
+            };
+            _skiaPSO = _device.CreateGraphicsPipelineState(psoDesc);
+            DebugLogger.Info("[DX12U] Skia composite shader loaded (DXC ps_6_6, premul alpha blend)");
+        }
+        catch (Exception e)
+        {
+            DebugLogger.Error($"[DX12U] Skia composite shader failed: {e.Message}");
+        }
+    }
+
     public void NextMode()
     {
         if (_modeNames.Count == 0) return;
@@ -1396,8 +1616,16 @@ public class DX12Renderer : IRenderer
         DebugLogger.Info($"[DX12Renderer] HUD: {(_hudVisible ? "ON" : "OFF")}");
     }
 
+    public void ToggleSkiaOverlay()
+    {
+        _skiaEnabled = !_skiaEnabled;
+        DebugLogger.Info($"[DX12Renderer] SkiaSharp overlay: {(_skiaEnabled ? "ON" : "OFF")}");
+    }
+
     public void UpdateAudioData(ref AudioUBO ubo, float[] spectrum, float[]? leftSpectrum = null, float[]? rightSpectrum = null)
     {
+        _currentAudioUBO = ubo;
+
         if (_verbose && _frameCount % 60 == 0)
         {
             DebugLogger.Info($"[DX12Debug] UpdateAudioData: spectrum={spectrum?.Length ?? 0}, left={leftSpectrum?.Length ?? 0}, right={rightSpectrum?.Length ?? 0}");
@@ -1463,6 +1691,26 @@ public class DX12Renderer : IRenderer
     public void UpdateHUD(QuadBufferedVisuals.VisualFrame frame)
     {
         _lastFrame = frame;
+
+        // Upload DSP data to b2 constant buffer
+        Span<float> dspData = stackalloc float[16];
+        dspData[0] = frame.MomentaryLUFS;
+        dspData[1] = frame.ShortTermLUFS;
+        dspData[2] = frame.IntegratedLUFS;
+        dspData[3] = frame.THDPercentage;
+        dspData[4] = frame.PhaseCorrelationDSP;
+        dspData[5] = frame.PeakDbL;
+        dspData[6] = frame.PeakDbR;
+        dspData[7] = frame.CrestFactorDbL;
+        dspData[8] = frame.DspBand0;
+        dspData[9] = frame.DspBand1;
+        dspData[10] = frame.DspBand2;
+        dspData[11] = frame.DspBand3;
+        dspData[12] = frame.DspBand4;
+        dspData[13] = frame.DspBand5;
+        dspData[14] = frame.DspBand6;
+        dspData[15] = frame.DspBand7;
+        Marshal.Copy(dspData.ToArray(), 0, _dspCBPtr, 16);
     }
 
     public void Render(float time)
@@ -1513,6 +1761,7 @@ public class DX12Renderer : IRenderer
 
         _commandList.SetGraphicsRootConstantBufferView(0, _audioCB.GPUVirtualAddress);
         _commandList.SetGraphicsRootConstantBufferView(1, _timeCB.GPUVirtualAddress);
+        _commandList.SetGraphicsRootConstantBufferView(2, _dspCB.GPUVirtualAddress);
 
         _commandList.IASetVertexBuffers(0, new VertexBufferView
         {
@@ -1528,13 +1777,13 @@ public class DX12Renderer : IRenderer
         });
         _commandList.IASetPrimitiveTopology(Vortice.Direct3D.PrimitiveTopology.TriangleStrip);
 
-        // SRV descriptor table (root param 2): [0]=spectrum, [1]=layer0, [2]=layer1, [3]=bloom0, [4]=bloom1, [5-7]=null
+        // SRV descriptor table (root param 3): [0]=spectrum, [1]=layer0, [2]=layer1, [3]=bloom0, [4]=bloom1, [5-7]=null
         var srvGpuHandle = _cbvSrvUavHeap.GetGPUDescriptorHandleForHeapStart();
-        _commandList.SetGraphicsRootDescriptorTable(2, srvGpuHandle);
+        _commandList.SetGraphicsRootDescriptorTable(3, srvGpuHandle);
 
-        // UAV descriptor table (root param 3): [8-11]=u0-u3 (null for now, future compute use)
+        // UAV descriptor table (root param 4): [8-11]=u0-u3 (null for now, future compute use)
         var uavGpuHandle = _cbvSrvUavHeap.GetGPUDescriptorHandleForHeapStart() + (int)(_srvDescriptorSize * 8);
-        _commandList.SetGraphicsRootDescriptorTable(3, uavGpuHandle);
+        _commandList.SetGraphicsRootDescriptorTable(4, uavGpuHandle);
 
         if (_verbose && _frameCount % 60 == 0)
             DebugLogger.Info($"[DX12Debug] Root signature set, current mode: {CurrentMode}");
@@ -1584,7 +1833,7 @@ public class DX12Renderer : IRenderer
             // Extract: layerTex0 → bloomTexture (downsampled)
             // Bind layerTex0 at t0 (descriptor offset 2)
             var extractSrvHandle = srvGpuHandle + (int)(_srvDescriptorSize * 2);
-            _commandList.SetGraphicsRootDescriptorTable(2, extractSrvHandle);
+            _commandList.SetGraphicsRootDescriptorTable(3, extractSrvHandle);
             
             _commandList.ResourceBarrierTransition(_bloomTexture, ResourceStates.CopyDest, ResourceStates.RenderTarget);
             var bloomRtv0 = _bloomRtvHeap.GetCPUDescriptorHandleForHeapStart();
@@ -1595,7 +1844,7 @@ public class DX12Renderer : IRenderer
             // Blur H: bloomTexture → bloomTexture2
             // Bind bloomTexture at t0 (descriptor offset 4)
             var blurHSrvHandle = srvGpuHandle + (int)(_srvDescriptorSize * 4);
-            _commandList.SetGraphicsRootDescriptorTable(2, blurHSrvHandle);
+            _commandList.SetGraphicsRootDescriptorTable(3, blurHSrvHandle);
             
             _commandList.ResourceBarrierTransition(_bloomTexture, ResourceStates.RenderTarget, ResourceStates.PixelShaderResource);
             _commandList.ResourceBarrierTransition(_bloomTexture2, ResourceStates.CopyDest, ResourceStates.RenderTarget);
@@ -1608,7 +1857,7 @@ public class DX12Renderer : IRenderer
             // Blur V: bloomTexture2 → bloomTexture
             // Bind bloomTexture2 at t0 (descriptor offset 5)
             var blurVSrvHandle = srvGpuHandle + (int)(_srvDescriptorSize * 5);
-            _commandList.SetGraphicsRootDescriptorTable(2, blurVSrvHandle);
+            _commandList.SetGraphicsRootDescriptorTable(3, blurVSrvHandle);
             
             _commandList.ResourceBarrierTransition(_bloomTexture2, ResourceStates.RenderTarget, ResourceStates.PixelShaderResource);
             _commandList.ResourceBarrierTransition(_bloomTexture, ResourceStates.PixelShaderResource, ResourceStates.RenderTarget);
@@ -1620,7 +1869,7 @@ public class DX12Renderer : IRenderer
             _commandList.ResourceBarrierTransition(_bloomTexture, ResourceStates.RenderTarget, ResourceStates.PixelShaderResource);
         }
 
-        // ── Composite: layer0 + layer1 (+ bloom) → backbuffer (R8G8B8A8_UNorm) ──
+        // ── PostFX pass: layer0 + layer1 + bloom → _postfxTex (HDR) ──
         // Transition layers: RenderTarget → PixelShaderResource
         if (!_bloomEnabled || _bloomExtractPSO == null)
         {
@@ -1628,6 +1877,35 @@ public class DX12Renderer : IRenderer
                 ResourceStates.RenderTarget, ResourceStates.PixelShaderResource);
         }
         _commandList.ResourceBarrierTransition(_layerTex1,
+            ResourceStates.RenderTarget, ResourceStates.PixelShaderResource);
+
+        // Transition postfxTex: Common → RenderTarget
+        var postfxBeforeState = _firstFrame ? ResourceStates.Common : ResourceStates.PixelShaderResource;
+        _commandList.ResourceBarrierTransition(_postfxTex,
+            postfxBeforeState, ResourceStates.RenderTarget);
+
+        var postfxRtv = _postfxRtvHeap.GetCPUDescriptorHandleForHeapStart();
+        _commandList.ClearRenderTargetView(postfxRtv, new Color4(0, 0, 0, 1));
+        _commandList.OMSetRenderTargets(postfxRtv, null);
+
+        // Bind SRV table at offset 0: t0=spectrum, t1=layer0, t2=layer1, t3=bloom0
+        _commandList.SetGraphicsRootDescriptorTable(3, srvGpuHandle);
+
+        if (_postfxPSO != null)
+        {
+            _commandList.SetPipelineState(_postfxPSO);
+            _commandList.DrawInstanced(4, 1, 0, 0);
+        }
+        else if (_compositePSO != null)
+        {
+            // Fallback to old composite if PostFX failed to load
+            _commandList.SetPipelineState(_compositePSO);
+            _commandList.DrawInstanced(4, 1, 0, 0);
+        }
+
+        // ── Tone-map pass: _postfxTex → backbuffer (LDR) ──
+        // Transition postfxTex: RenderTarget → PixelShaderResource
+        _commandList.ResourceBarrierTransition(_postfxTex,
             ResourceStates.RenderTarget, ResourceStates.PixelShaderResource);
 
         // Transition back buffer: Common/Present → RenderTarget
@@ -1640,20 +1918,59 @@ public class DX12Renderer : IRenderer
         _commandList.ClearRenderTargetView(backBufferRtv, new Color4(0, 0, 0, 1));
         _commandList.OMSetRenderTargets(backBufferRtv, null);
 
-        // Bind SRV table at offset 0 so t0=spectrum, t1=layer0, t2=layer1, t3=bloom0
-        // Composite shader samples t1=layer0, t2=layer1, t3=bloom0
-        // Bloom combine shader samples t1=layer0 (scene), t3=bloom0 (bloom)
-        _commandList.SetGraphicsRootDescriptorTable(2, srvGpuHandle);
+        // Bind the complete SRV table so PostFxTex at register t6 resolves to postfxTex.
+        _commandList.SetGraphicsRootDescriptorTable(3, srvGpuHandle);
 
-        // Use composite shader (handles bloom internally via t3)
-        if (_compositePSO != null)
+        if (_tonemapPSO != null)
         {
+            _commandList.SetPipelineState(_tonemapPSO);
+            _commandList.DrawInstanced(4, 1, 0, 0);
+        }
+        else if (_compositePSO != null)
+        {
+            // Fallback: old composite reads t1=layer0 directly
+            _commandList.SetGraphicsRootDescriptorTable(3, srvGpuHandle);
             _commandList.SetPipelineState(_compositePSO);
             _commandList.DrawInstanced(4, 1, 0, 0);
         }
-        else if (_bloomEnabled && _bloomCombinePSO != null)
+
+        // ── SkiaSharp 2D overlay pass: alpha-blend on backbuffer ──
+        if (_skiaEnabled && _skiaPSO != null && _skiaOverlay != null)
         {
-            _commandList.SetPipelineState(_bloomCombinePSO);
+            // Render 2D overlay content on CPU
+            var skiaPixels = _skiaOverlay.Render(_time, ref _currentAudioUBO);
+
+            // Copy pixel data to upload buffer
+            unsafe
+            {
+                fixed (byte* src = skiaPixels)
+                {
+                    Buffer.MemoryCopy(src, (void*)_skiaUploadPtr, _skiaUploadSize, skiaPixels.Length);
+                }
+            }
+
+            // Copy upload buffer → skiaTex (default heap)
+            _commandList.ResourceBarrierTransition(_skiaTex, ResourceStates.PixelShaderResource, ResourceStates.CopyDest);
+            var skiaSrcLoc = new TextureCopyLocation(_skiaUploadBuffer, new PlacedSubresourceFootPrint
+            {
+                Offset = 0,
+                Footprint = new SubresourceFootPrint
+                {
+                    Format = Format.R8G8B8A8_UNorm,
+                    Width = (uint)_width,
+                    Height = (uint)_height,
+                    Depth = 1,
+                    RowPitch = (uint)(_width * 4),
+                },
+            });
+            var skiaDstLoc = new TextureCopyLocation(_skiaTex, 0);
+            _commandList.CopyTextureRegion(skiaDstLoc, 0, 0, 0, skiaSrcLoc, null);
+            _commandList.ResourceBarrierTransition(_skiaTex, ResourceStates.CopyDest, ResourceStates.PixelShaderResource);
+
+            // Draw overlay with alpha blending (backbuffer is already RenderTarget)
+            var skiaSrvHandle = srvGpuHandle + (int)(_srvDescriptorSize * 7);
+            _commandList.SetGraphicsRootDescriptorTable(3, skiaSrvHandle);
+            _commandList.SetPipelineState(_skiaPSO);
             _commandList.DrawInstanced(4, 1, 0, 0);
         }
 
@@ -1738,12 +2055,13 @@ public class DX12Renderer : IRenderer
         _commandList.SetDescriptorHeaps(new[] { _cbvSrvUavHeap, _samplerHeap });
         _commandList.SetGraphicsRootConstantBufferView(0, _audioCB.GPUVirtualAddress);
         _commandList.SetGraphicsRootConstantBufferView(1, _timeCB.GPUVirtualAddress);
+        _commandList.SetGraphicsRootConstantBufferView(2, _dspCB.GPUVirtualAddress);
         _commandList.IASetVertexBuffers(0, new VertexBufferView { BufferLocation = _vertexBuffer.GPUVirtualAddress, SizeInBytes = 4 * 5 * sizeof(float), StrideInBytes = 5 * sizeof(float) });
         _commandList.IASetIndexBuffer(new IndexBufferView { BufferLocation = _indexBuffer.GPUVirtualAddress, SizeInBytes = 6 * sizeof(uint), Format = Format.R32_UInt });
         _commandList.IASetPrimitiveTopology(Vortice.Direct3D.PrimitiveTopology.TriangleStrip);
 
         var srvGpu = _cbvSrvUavHeap.GetGPUDescriptorHandleForHeapStart();
-        _commandList.SetGraphicsRootDescriptorTable(2, srvGpu);
+        _commandList.SetGraphicsRootDescriptorTable(3, srvGpu);
 
         // Layer 0 → shared texture
         _commandList.ResourceBarrierTransition(_layerTex0, _firstFrame ? ResourceStates.Common : ResourceStates.PixelShaderResource, ResourceStates.RenderTarget);
@@ -1792,7 +2110,7 @@ public class DX12Renderer : IRenderer
 
         var layerSrv = srvGpu;
         layerSrv += (int)(_srvDescriptorSize * 2);
-        _commandList.SetGraphicsRootDescriptorTable(2, layerSrv);
+        _commandList.SetGraphicsRootDescriptorTable(3, layerSrv);
 
         if (_compositePSO != null)
         {
@@ -1841,6 +2159,7 @@ public class DX12Renderer : IRenderer
         _indexBuffer?.Dispose();
         _audioCB?.Dispose();
         _timeCB?.Dispose();
+        _dspCB?.Dispose();
         _spectrumTexture?.Dispose();
         _spectrumUploadBuffer?.Dispose();
 
@@ -1849,6 +2168,14 @@ public class DX12Renderer : IRenderer
         _layerTex1?.Dispose();
         _rtvHeapLayer1?.Dispose();
         _overlayPSO?.Dispose();
+        _postfxTex?.Dispose();
+        _postfxRtvHeap?.Dispose();
+        _postfxPSO?.Dispose();
+        _tonemapPSO?.Dispose();
+        _skiaTex?.Dispose();
+        _skiaUploadBuffer?.Dispose();
+        _skiaPSO?.Dispose();
+        _skiaOverlay?.Dispose();
         _rtvHeap?.Dispose();
         _cbvSrvUavHeap?.Dispose();
         _samplerHeap?.Dispose();

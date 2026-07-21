@@ -4,6 +4,7 @@
 // Kick = radial impulse, lightning between high-amplitude bins on transients
 // Starfield, standard overlays, applyPostFX
 #include "include/audio_cb.hlsl"
+#include "include/dsp_cb.hlsl"
 #include "include/color_utils.hlsl"
 #include "include/noise.hlsl"
 #include "include/audio_reactive.hlsl"
@@ -60,6 +61,10 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
     float2 p = screenToAspect(uv);
     float r = length(p);
 
+    // DSP complement — additive to brain data, never replaces
+    float lufs = lufsNormalized();
+    float crest = crestFactorNormalized();
+
     // ── Background — dark storm ──
     float3 col = float3(0.006, 0.005, 0.012) * (1.0 - a.isSilent * 0.98);
     col += starfield(uv, a) * 0.15;
@@ -87,8 +92,9 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
             float hue = a.hueBase + e.freqFrac * a.hueRange;
             pCol = lerp(pCol, hsv(hue, 0.6 * a.satur, 0.9), 0.3);
 
-            // Brightness driven by amplitude
-            col += pCol * glow * e.intensity * 0.35 * (1.0 - a.isSilent);
+            // Brightness driven by amplitude, LUFS boosts density
+            float brightMul = e.intensity * 0.35 * (1.0 + lufs * 0.25);  // LUFS: louder = denser glow
+            col += pCol * glow * brightMul * (1.0 - a.isSilent);
 
             // Bright core for high-amplitude
             float coreGlow = exp(-dist * dist * 200.0) * e.amplitude * 0.25;
@@ -97,6 +103,7 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
     }
 
     // ── Lightning between high-amplitude adjacent bins on transients ──
+    // Crest factor: dynamic material = more dramatic lightning
     if (a.transient > 0.25) {
         [loop] for (int li = 0; li < STORM_BINS - 1; li++) {
             AudioElement eL = audioSimElement(li, STORM_BINS, a);
@@ -109,6 +116,7 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
                 float bolt = stormLightning(p, pos1, pos2, float(li));
                 float boltIntensity = bolt * a.transient * a.beam * 0.5 * a.beamActive
                                     * (eL.amplitude + eR.amplitude) * 0.5;
+                boltIntensity *= (1.0 + crest * 0.5);  // crest: dynamic range = sharper lightning
                 col += a.brainCol2 * boltIntensity * (1.0 - a.isSilent);
             }
         }

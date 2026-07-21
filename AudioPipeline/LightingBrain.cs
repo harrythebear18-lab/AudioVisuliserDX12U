@@ -101,6 +101,7 @@ namespace StageSimWASAPI
         // Color palette per section
         public Color32 CurrentColor { get; private set; }
         public Color32 SecondaryColor { get; private set; }
+        public Color32 TertiaryColor { get; private set; }  // blender/tertiary color from wheel
         private int _colorPairIndex = 0;
 
         // Effect decisions — visualizer-native triggers (replaces stage-sim pyro/smoke/flash)
@@ -185,6 +186,11 @@ namespace StageSimWASAPI
         public float SectionHueCenter => _sectionHueCenter;
         public float SectionHueRange => _sectionHueRange;
         private bool _useColorWheel = true;      // toggle between color wheel and fixed pairs
+
+        // Random hue offsets for each color — so they start at different points on the wheel
+        private float _primaryHueOffset;    // random offset for primary color
+        private float _secondaryHueOffset;  // random offset for secondary color
+        private float _tertiaryHueOffset;   // random offset for tertiary/blender color
 
         // Section hue centers (0-1 on the color wheel)
         // 0=red, 0.083=orange, 0.167=yellow, 0.25=green, 0.417=cyan, 0.5=blue, 0.667=purple, 0.833=pink
@@ -753,6 +759,33 @@ namespace StageSimWASAPI
                 }
                 CurrentColor = ColorPairs[_colorPairIndex][0];
                 SecondaryColor = ColorPairs[_colorPairIndex][1];
+
+                // Pick new random hue offsets on section change — so each color
+                // starts at a different point on the wheel, not clustered together
+                _primaryHueOffset = (float)(_rng.NextDouble() - 0.5) * _sectionHueRange;
+                _secondaryHueOffset = (float)(_rng.NextDouble() - 0.5) * _sectionHueRange;
+                _tertiaryHueOffset = (float)(_rng.NextDouble() - 0.5) * _sectionHueRange * 1.5f;
+
+                // Generate all three colors from the wheel at their own random offsets
+                if (_useColorWheel)
+                {
+                    float primHue = Mathf.Repeat(_baseHue + _sectionHueCenter + _primaryHueOffset, 1f);
+                    CurrentColor = ColorHSV(primHue, 0.9f, 1f);
+
+                    float secHue = Mathf.Repeat(_baseHue + _sectionHueCenter + _secondaryHueOffset, 1f);
+                    SecondaryColor = ColorHSV(secHue, 0.8f, 0.95f);
+
+                    float blendHue = Mathf.Repeat(_baseHue + _sectionHueCenter + _tertiaryHueOffset, 1f);
+                    TertiaryColor = ColorHSV(blendHue, 0.6f, 0.9f);
+                }
+                else
+                {
+                    TertiaryColor = new Color32(
+                        (byte)((CurrentColor.r + SecondaryColor.r) / 2),
+                        (byte)((CurrentColor.g + SecondaryColor.g) / 2),
+                        (byte)((CurrentColor.b + SecondaryColor.b) / 2),
+                        255);
+                }
 
                 // Update color wheel section center
                 float hc, hr;
