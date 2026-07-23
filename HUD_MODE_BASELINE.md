@@ -12,8 +12,8 @@ Review every HUD mode after the shared HDR pipeline is confirmed healthy. Use th
 ## Current Tally
 
 - **Good**: 17 modes (1, 2, 3, 4, 5, 6, 10, 12, 13, 15, 16, 17, 19, 21, 22, 25, 26)
-- **Tune**: 3 modes (7, 14, 29)
-- **Rewrite**: 8 modes (8, 9, 11, 18, 20, 27, 28, 30)
+- **Tune**: 4 modes (7, 8, 14, 29)
+- **Rewrite**: 7 modes (9, 11, 18, 20, 27, 28, 30)
 - **Gold Standard**: Mode 23 (Acoustic Ferrofluid) — reference implementation
 - **2nd Best**: Mode 24 (Acoustic Droplets & Mirror Pool)
 
@@ -26,7 +26,7 @@ Review every HUD mode after the shared HDR pipeline is confirmed healthy. Use th
 | 5 | 4 | Audio Lichtenberg | `dx_waveform.hlsl` | Good | Branching discharge tree; bass=trunk mass, mid bands=topology (independent L/R), highs/air=filament tips, beat=traveling flash, kick=strike flare, transient=sparks. |
 | 6 | 5 | Chladni Plate | `dx_sphere.hlsl` | Good | Standing-wave interference field; 8 mode-pairs per band, section=regime unlock, domBand=highlight, L/R energy=mode skew, beat=phase realign, kick=impulse ripple. |
 | 7 | 6 | Aurora Borealis | `dx_aurora.hlsl` | Tune | Raymarched volumetric ionospheric curtains (1-4 based on section). Bass=curtain mass/thickness, mids=topology (curl-noise fold), highs=micro-detail filaments. Stereo=L/R independent curtain placement. Beat=coherent brightness wave, kick=ground-level shockfront, transient=tearing rupture through curtain. DSP: LUFS→exposure, crest→density sharpness. No applyPostFX, no Time orbit. |
-| 8 | 7 | DNA Helix | `dx_dna_helix.hlsl` | Rewrite | Reimagine for multi-layer pipeline. See `DX12U_SHADER_ROADMAP.md` for concept. |
+| 8 | 7 | DNA Helix | `dx_dna_helix.hlsl` | Tune | 48-segment 3D double helix, L/R stereo strands. Needs: remove applyPostFX, remove postfx.hlsl include, remove audioSimElement extra spectrum samples, use AudioData bands directly. Visual method is sound. |
 | 9 | 8 | Spectrum Singularity | `dx_heartbeat.hlsl` | Rewrite | Reimagine for multi-layer pipeline. See `DX12U_SHADER_ROADMAP.md` for concept. |
 | 10 | 9 | RTX Mesh | `dx_rtx_mesh.hlsl` | Good | |
 | 11 | 10 | Spectrum Kaleidoscope | `dx_ray_marched.hlsl` | Rewrite | Reimagine for multi-layer pipeline. See `DX12U_SHADER_ROADMAP.md` for concept. |
