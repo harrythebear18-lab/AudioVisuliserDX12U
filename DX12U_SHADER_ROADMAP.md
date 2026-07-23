@@ -277,11 +277,10 @@ shaders/
 
 ### Mode 10: Ray Marched — `dx_ray_marched.hlsl`
 **Display name**: Spectrum Kaleidoscope
-**Status**: 🔴 Rewrite
-**Concept**: 6-fold kaleidoscopic fractal with 8 iterations, orbit trap coloring, 64-step raymarch
-**DSP**: Not integrated
-**Audio mapping**: Bass→fold power, treble→rotation, beat→zoom, kick→fold explosion, transient→glitch
-**Rewrite approach**: Reimagine for multi-layer pipeline
+**Status**: ✅ Good — Kaleidoscopic IFS fractal (rewritten, pending final tuning)
+**Concept**: 3D kaleidoscopic IFS fractal with 6 fold iterations, each driven by its own brain band (b0-b5). Band energy shapes fold scale, rotation, displacement, and Y-warp per iteration. Camera pulled back with gentle vertical sway, beat-driven zoom. 48-step raymarch, orbit trap coloring with L/R stereo tint.
+**DSP**: Integrated — LUFS→emission, crest→specular/fresnel, THD→glitch displacement, phase→(removed with orbit)
+**Audio mapping**: b0→fold scale+camera zoom, b1→fold scale, b2→Y-warp+camera sway, b3→fold count+rotation, b4→fresnel+micro-displacement, b5→emission+micro-displacement, b6→(global), b7→depth haze, beat→zoom+flash, kick→fold explosion+flash, transient→glitch, stereoBal→L/R color tint, envelope→emission gain
 
 ### Mode 11: Volumetric Clouds — `dx_volumetric_clouds.hlsl`
 **Display name**: Volumetric Clouds
