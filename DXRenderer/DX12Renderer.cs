@@ -119,7 +119,7 @@ public class DX12Renderer : IRenderer
         { "ray_marched", "Spectrum Kaleidoscope" },
         { "volumetric_clouds", "Volumetric Clouds" },
         { "fractal_dimensions", "Fractal Dimensions" },
-        { "neural_network", "Neural Network" },
+        { "neural_network", "Acoustic Holography" },
         { "quantum_field", "Quantum Field" },
         { "holographic", "Holographic" },
         { "particle_storm", "Particle Storm" },
@@ -128,12 +128,12 @@ public class DX12Renderer : IRenderer
         { "galaxy", "Spectrum Galaxy" },
         { "wave_tessellation", "Wave Pool + Tessellation" },
         { "audio_tessellation", "Audio Tessellation" },
-        { "compute_shaders", "Spectrum Vortex" },
-        { "rtx_reflections", "Spectrum Reflections" },
+        { "compute_shaders", "Acoustic Ferrofluid" },
+        { "rtx_reflections", "Acoustic Droplets & Mirror Pool" },
         { "spectrum_3d", "3D Spectrum Bars" },
         { "spatial_dolby", "Spatial Dolby" },
         { "water_droplets", "Water Droplet Pool" },
-        { "matrix_rain", "3D Rain Particles" },
+        { "matrix_rain", "Matrix Rain" },
         { "waveform_tunnel", "Audio Waveform Tunnel" },
         { "crystal_lattice", "Synthwave Grid" },
     };
@@ -903,7 +903,7 @@ public class DX12Renderer : IRenderer
             "wave_tessellation",  // 20. Wave Pool + Tessellation
             "audio_tessellation", // 21. Audio Tessellation — Voronoi terrain with audio
             "compute_shaders",    // 22. Compute Shaders — 3D raymarched vortex
-            "rtx_reflections",    // 23. Spectrum Reflections — chrome spheres + mirror floor
+            "rtx_reflections",    // 23. Acoustic Droplets & Mirror Pool — falling objects + reflective liquid
             "spectrum_3d",        // 24. 3D Spectrum Bars
             "spatial_dolby",      // 25. Spatial Dolby — 3D spatial audio field
             "water_droplets",    // 26. Water Droplet Pool — 3D ripple physics
