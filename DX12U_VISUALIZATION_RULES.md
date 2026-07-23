@@ -176,3 +176,174 @@ A mode is ready to be marked good only when it has all of the following:
 - Applying final postfx or tone mapping inside an individual mode.
 - Editing global shader or pipeline files during a per-mode task.
 - Marking a mode good solely because it compiles or loads.
+
+## Technical Implementation Standards
+
+These standards codify the proven patterns from the gold-standard modes (4, 5, 6, 8, 10, 12, 13, 14, 15, 17, 21, 22, 23). Every mode rewrite or new mode must follow them.
+
+### Includes
+
+- **Required**: `audio_cb.hlsl`, `color_utils.hlsl`, `noise.hlsl`, `audio_reactive.hlsl`, `layers.hlsl`
+- **For raymarched modes**: add `raymarch.hlsl`
+- **For SDF surface modes**: add `sdf.hlsl`
+- **For DSP-using modes**: add `dsp_cb.hlsl`
+- **Forbidden**: `postfx.hlsl` and `applyPostFX()` in any mode that outputs to the shared pipeline. The pipeline owns tonemapping, bloom, grain, CA, and vignette.
+
+### Per-Element Audio System
+
+Use `audioSimElement(idx, total, a)` for per-source/per-particle audio data. This is the proven method across all gold-standard modes.
+
+- **24 elements** is the sweet spot: enough density for rich interference, few enough for `[unroll]` loops
+- Each element provides: `amplitude`, `ampL`, `ampR`, `pan`, `panOffset`, `intensity`, `transientScatter`, `freqFrac`
+- Every visual element must trace its audio origin through this struct or direct spectrum sampling
+
+### Noise Gate and Compression
+
+Every source/particle must be noise-gated to avoid idle noise:
+
+```hlsl
+float gate = smoothstep(0.02, 0.08, e.amplitude);
+```
+
+Bass elements use a compressor curve (perceptual loudness):
+
+```hlsl
+float energy = (band < 4) ? pow(rawEnergy, 0.5) : rawEnergy;
+```
+
+### DSP Additive Formulas (Never Replace Brain)
+
+```hlsl
+// LUFS — boosts density/emission
+val *= (1.0 + lufsNormalized() * 0.2);
+
+// Crest — sharpens edges/contrast
+sharpness = 1.0 + crestFactorNormalized() * 0.5;
+
+// THD — adds controlled roughness/turbulence
+phase += thdNormalized() * noise * 0.05;
+
+// Phase coherence — mono = coherent, stereo = complex
+coherence = lerp(0.3, 1.0, phaseCoherence());
+```
+
+### Camera Setup
+
+- Use `cameraRay(camPos, camTarget, p, fov)` from `raymarch.hlsl` — never manual 2D projection
+- Camera orbit driven by: `a.section * 0.8 + Time * 0.03 * a.motSpeed` (section-driven, not idle)
+- Stereo balance shifts camera: `a.stereoBal * 0.2`
+- Stereo diff adjusts height: `a.stereoDiff * 0.15`
+- FOV typically 0.35–1.0 depending on scene scale
+- Flip screen coords for ray: `float2(-p.x, -p.y)` when needed
+
+### Volumetric Raymarching (for field/volume modes)
+
+```hlsl
+float t = 0.15;           // start offset
+float3 accum = 0.0;
+float transmittance = 1.0;
+float stepSize = 0.08;     // or adaptive
+
+[loop] for (int i = 0; i < 48; i++) {
+    float3 sp = camPos + rd * t;
+    // Bounding volume check
+    if (length(sp) > maxRadius) break;
+
+    float density = fieldFunction(sp, ...);
+    density *= smoothstep(0.002, 0.02, density);  // noise gate
+
+    if (density > 0.003) {
+        float3 pointCol = colorFunction(sp, ...);
+        float depthFog = exp(-t * 0.08);
+        float emission = density * intensity * depthFog;
+
+        // Beer-Lambert extinction
+        float sigma = density * 0.15 + 0.02;
+        transmittance *= exp(-sigma * stepSize);
+
+        accum += pointCol * emission * transmittance;
+    }
+    t += stepSize;  // or adaptive: max(0.04, stepSize - density * 0.03)
+}
+```
+
+### SDF Surface Raymarching (for solid geometry modes)
+
+```hlsl
+float t = 0.05;
+float marchGlow = 0.0;
+float steps = 0.0;
+bool hit = false;
+
+[loop] for (int i = 0; i < 48; i++) {  // or 64 for complex SDFs
+    float3 sp = camPos + rd * t;
+    float d = sceneSDF(sp, a);
+    marchGlow += 0.01 / (1.0 + d * d * 50.0);
+    steps += 1.0;
+    if (d < 0.001) { hit = true; break; }
+    t += d * 0.5;  // 0.5 = safety factor
+    if (t > 10.0) break;
+}
+float ao = 1.0 - steps / float(MAX_STEPS) * 0.5;
+```
+
+On hit: compute normal via finite differences, apply 2-3 light setup with diffuse + spec + fresnel, use `cleanLighting()` or inline equivalent.
+
+### Golden Ratio Acoustic Mapping
+
+For frequency-to-spatial mappings (wavelength, depth, source positioning):
+
+```hlsl
+#define PHI 1.618
+float Cf = (Dx * PI) / PHI;  // Dx = frequency-dependent distance, Cf = compressed frequency
+```
+
+This applies golden ratio compression to circumference-derived values, producing natural acoustic-perception-aligned spatial mapping.
+
+### Distinct Physical Events
+
+Each audio event must produce a visually distinct physical response:
+
+- **Beat** (`a.beat * a.tempoConf`): system-wide compression, contraction, or traveling wave through the field
+- **Kick** (`a.kick * a.kickConf * exp(-a.beatPhase * 3.0)`): localized impulse, shockfront, radial burst, impact
+- **Transient** (`a.transient`): rupture, scatter, spark emission, phase break, material disruption
+- **Beat anticipation** (`a.beatAnt`): pre-beat tension, subtle build
+- **Burst** (`a.burstTrig`, `a.burstInt`): event-type-dispatched flash via `effectBurst()`
+
+Never collapse these into a single brightness pulse.
+
+### Color System
+
+- Primary: `a.brainCol`, `a.brainCol2`, `a.brainCol3` — the brain's palette
+- Frequency mapping: `hsv(a.hueBase + freqFrac * a.hueRange, 0.6 * a.satur, 0.9)`
+- Blend: `lerp(a.brainCol, a.brainCol2, freqFrac)` for frequency-positioned color
+- Section tint: `a.section * 0.03`, color pulse: `a.colorPulse * 0.04`
+- Never use flat block colors or hardcoded palettes
+
+### Output Contract
+
+```hlsl
+// standardOverlays — subtle, never overpowering
+col += standardOverlays(p, r, a) * 0.02;  // volumetric modes
+// or 0.2-0.5 for surface/particle modes with more negative space
+
+// HDR limiter — prevent bloom blowout before pipeline
+float maxC = max(col.r, max(col.g, col.b));
+if (maxC > 1.2) col *= 1.2 / maxC;  // 1.2 for most, 1.5 for dark volumetric modes
+
+// Silence suppression
+col *= (1.0 - a.isSilent * 0.98);  // or use `silence = 1.0 - a.isSilent` multiplier
+
+return float4(col, 1.0);
+```
+
+### What Makes a Mode Showcase-Worthy
+
+1. **Distinct silhouette**: recognizable in a single still frame — not a generic blob
+2. **3D depth cues**: parallax, depth fog, occlusion, perspective scaling — never flat 2D
+3. **Causal audio response**: viewer can see what the music is doing without HUD
+4. **Multi-scale detail**: macro (form/structure) + meso (patterns/waves) + micro (shimmer/edges)
+5. **Physical identity**: the mode IS a phenomenon (black hole, interference field, storm, tessellation), not a collection of effects
+6. **Stereo spatial behavior**: L/R produces visible spatial separation, not just brightness changes
+7. **Dynamic range response**: quiet passages are dark and minimal, loud passages are full and bright — driven by `a.gated`, `a.envelope`, `a.brightness`
+8. **No block colors, no generic spheres, no glyph-like shapes** — everything is field-derived, wave-derived, or physically motivated

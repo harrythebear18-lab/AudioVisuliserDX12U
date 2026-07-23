@@ -263,10 +263,10 @@ shaders/
 
 ### Mode 8: Heartbeat — `dx_heartbeat.hlsl`
 **Display name**: Spectrum Singularity
-**Status**: ✅ Good as-is (user baseline)
-**Concept**: Gravitational lensing black hole with 64-bin accretion disk, Doppler beaming, photon ring, Einstein ring
-**DSP**: Not integrated — needs additive DSP complement (LUFS→lensing boost, phase→disk symmetry, crest→disk sharpness)
-**Audio mapping**: Event horizon←bass, disk←spectrum, beat→photon ring, kick→gravitational wave, transient→relativistic jets
+**Status**: ✅ Good — Acoustic Wavefront Propagator (rewritten)
+**Concept**: 24 golden-ratio distributed acoustic sources on a Fibonacci sphere, each emitting expanding spherical wavefronts rendered as thin projected ring outlines in 3D perspective. Interference patterns emerge naturally from additive overlap. No particles, no SDF, no volumetric.
+**DSP**: Integrated — LUFS→emission, crest→ring sharpness, THD→wavefront roughness, phase→interference coherence
+**Audio mapping**: b0→expansion speed, b1→source radius, b2→topology, b3→wave count, b4→sharpness, b5→interference glow, b6→micro-ripple, b7→dissipation, beat→sync pulse, kick→bass impulse wave, transient→ring rupture
 
 ### Mode 9: RTX Mesh — `dx_rtx_mesh.hlsl`
 **Display name**: RTX Mesh
@@ -396,10 +396,10 @@ shaders/
 
 ### Mode 25: Spatial Dolby — `dx_spatial_dolby.hlsl`
 **Display name**: Spatial Dolby
-**Status**: ✅ Good as-is (user baseline)
-**Concept**: 3D spatial audio field with 16 spectrum objects positioned by L/R pan + amplitude, room grid
-**DSP**: Not integrated — needs additive DSP complement (phase→spatial coherence, LUFS→field intensity, bands→spatial zones)
-**Audio mapping**: Pan→X, frequency→Y, loudness→Z depth, kick→bass lunge, transient→scatter, stereo width→field expansion
+**Status**: ✅ Good — Enhanced 3D Spatial Soundscape (rewritten)
+**Concept**: 8 brain bands split into 16 objects (L+R per band), each sampling its own stereo spectrum channel. L/R phase coherence drives horizontal beam links, adjacent band links are section-gated. Room grid, listener position, transient sound wave rings, beat pulse rings.
+**DSP**: Integrated — LUFS→emission, crest→core sharpness, THD→position jitter, phase→L/R link coherence
+**Audio mapping**: b0-b7→per-band L/R objects, beat→brighten+listener pulse, kick→bass lunge, transient→scatter+rings, section→vertical links unlock, envelope→emission gain
 
 ### Mode 26: Water Droplets — `dx_water_droplets.hlsl`
 **Display name**: Water Droplet Pool
