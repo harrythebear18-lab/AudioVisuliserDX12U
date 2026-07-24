@@ -96,7 +96,7 @@ float4 main(PSInput input) : SV_TARGET {
         // Hue — base + range + color pulse + section
         float barHue = hueBase + barFrac * hueRange * 0.4 + colorPulse * 0.05 + section * 0.02;
         float barSat = 0.85 * satur;
-        float barVal = 0.9 * (0.7 + brightness * 0.3 + glow * 0.2 * bloomActive + beam * 0.15 * beamActive);
+        float barVal = 0.9 * (0.7 + brightness * 0.3 + beam * 0.15 * beamActive);
 
         // RIGHT side
         {
@@ -112,16 +112,8 @@ float4 main(PSInput input) : SV_TARGET {
             float barBottom = 0.85;
             float barMask = step(barTop, tiltP.y) * step(tiltP.y, barBottom) * barEdge;
             float heightFrac = saturate((barBottom - tiltP.y) / max(0.001, barBottom - barTop));
-            float topGlow = smoothstep(0.7, 1.0, heightFrac) * (beat * 0.4 + dynLight * 0.2 * dynActive);
-            float3 barCol = hsv(barHue + heightFrac * 0.05, barSat, barVal + topGlow);
+            float3 barCol = hsv(barHue + heightFrac * 0.05, barSat, barVal);
             col = lerp(col, barCol, barMask * (1.0 - silent * 0.98));
-            // Bar top cap glow — bright line at top of each bar
-            float capGlow = smoothstep(0.95, 1.0, heightFrac) * (0.3 + beat * 0.3);
-            col += hsv(barHue, 0.5, capGlow) * barEdge * (1.0 - silent * 0.98);
-            // Reflection below bar
-            float reflY = 0.85 + (0.85 - barTop) * 0.3;
-            float reflMask = step(0.85, tiltP.y) * step(tiltP.y, reflY) * barEdge;
-            col += barCol * reflMask * 0.15 * (1.0 - silent * 0.98);
         }
 
         // LEFT side (mirrored)
@@ -137,84 +129,13 @@ float4 main(PSInput input) : SV_TARGET {
             float barBottom = 0.85;
             float barMask = step(barTop, tiltP.y) * step(tiltP.y, barBottom) * barEdge;
             float heightFrac = saturate((barBottom - tiltP.y) / max(0.001, barBottom - barTop));
-            float topGlow = smoothstep(0.7, 1.0, heightFrac) * (beat * 0.4 + dynLight * 0.2 * dynActive);
-            float3 barCol = hsv(barHue + heightFrac * 0.05, barSat, barVal + topGlow);
+            float3 barCol = hsv(barHue + heightFrac * 0.05, barSat, barVal);
             col = lerp(col, barCol, barMask * (1.0 - silent * 0.98));
-            float capGlow = smoothstep(0.95, 1.0, heightFrac) * (0.3 + beat * 0.3);
-            col += hsv(barHue, 0.5, capGlow) * barEdge * (1.0 - silent * 0.98);
-            float reflY = 0.85 + (0.85 - barTop) * 0.3;
-            float reflMask = step(0.85, tiltP.y) * step(tiltP.y, reflY) * barEdge;
-            col += barCol * reflMask * 0.15 * (1.0 - silent * 0.98);
         }
     }
 
-    // Center seam glow — stereo balance shifts the glow
-    {
-        float seamX = stereoBal * 0.15;
-        float seamDist = abs(p.x - seamX);
-        float seamGlow = smoothstep(0.15, 0.0, seamDist) * smoothstep(0.3, 0.0, abs(p.y - 0.85)) * 0.1;
-        col += hsv(hueCenter, 0.4, 0.8) * seamGlow * (1.0 - silent);
-    }
-
-    // Beat shockwave ring — tempo confidence gated, expands from center on beat
-    {
-        float waveSpeed = 0.3 + bpmNorm * 0.2;
-        float wavePhase = frac(Time * waveSpeed + beat * 0.5);
-        float waveR = wavePhase * 1.5;
-        float wave = smoothstep(0.04, 0.0, abs(r - waveR)) * (1.0 - wavePhase) * beat * 0.2 * tempoConf;
-        col += hsv(hueCenter, 0.3, 1.0) * wave * (1.0 - silent);
-        // Second ring offset
-        float wave2 = smoothstep(0.03, 0.0, abs(r - waveR * 0.7)) * (1.0 - wavePhase) * kick * 0.15 * kickConf;
-        col += hsv(hueCenter + 0.05, 0.4, 1.0) * wave2 * (1.0 - silent);
-    }
-
-    // Kick flash — center, confidence gated, brighter
-    {
-        float kickGlow = exp(-r * r * 8.0) * kick * 0.25 * kickConf;
-        col += hsv(hueCenter, 0.2, 1.0) * kickGlow * (1.0 - silent);
-        // Floor glow line on kick
-        float floorGlow = exp(-abs(p.y - 0.85) * 30.0) * kick * 0.1 * kickConf;
-        col += hsv(hueCenter, 0.3, 1.0) * floorGlow * (1.0 - silent);
-    }
-
-    // Effect burst
-    if (burstTrig > 0.5) {
-        if (burstType < 0.5) {
-            col += hsv(hueCenter + 0.1, 0.4, 1.0) * smoothstep(0.8, 0.0, r) * burstInt * 0.15;
-        } else if (burstType < 1.5) {
-            float swR = burstInt * 1.3;
-            col += hsv(hueCenter, 0.3, 1.0) * smoothstep(0.05, 0.0, abs(r - swR)) * (1.0 - burstInt) * 0.2;
-        } else if (burstType < 2.5) {
-            col = lerp(col, hsv(hueCenter + 0.15, 0.6, 0.8), burstInt * 0.1);
-        } else {
-            float spark = hash11(dot(uv, float2(12.9, 78.2)) + Time);
-            col += hsv(hueCenter + spark * 0.3, 0.3, 1.0) * step(0.98, spark) * burstInt * 0.3;
-        }
-    }
-
-    // Section change flash
-    if (shouldChg > 0.5) {
-        col += hsv(hueCenter, 0.2, 1.0) * smoothstep(1.0, 0.0, r) * 0.08;
-    }
-
-    // Phrase pulse
-    {
-        float phraseFrac = phraseBeat / 16.0;
-        col *= (1.0 + sin(phraseFrac * 3.14159) * 0.05 * energy);
-    }
-
-    // Atmosphere haze
-    {
-        float haze = smoothstep(1.0, 0.3, r) * (0.01 + atmos * 0.04) * ambActive;
-        col += hsv(hueCenter, 0.2, 0.3) * haze * (1.0 - silent);
-    }
-
-    // Motion persistence
-    col *= (1.0 + motionPers * 0.1);
-
-    // Global modulators
-    col *= (0.3 + gatedOverall * 0.7 + brightness * 0.2);
-    if (beatDet > 0.5) col += hsv(hueCenter, 0.1, 0.3) * 0.01 * beat;
+    // Global modulator
+    col *= (0.3 + gatedOverall * 0.7);
     col *= (1.0 - silent * 0.98);
 
     // Perspective vignette
@@ -223,6 +144,8 @@ float4 main(PSInput input) : SV_TARGET {
         col *= lerp(1.0, 0.5 + vig * 0.5, persp);
     }
 
-    col = col / (1.0 + col);
+    // HDR brightness limiter
+    float maxC = max(col.r, max(col.g, col.b));
+    if (maxC > 1.5) col *= 1.5 / maxC;
     return float4(col, 1);
 }

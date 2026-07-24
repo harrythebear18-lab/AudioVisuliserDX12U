@@ -132,7 +132,7 @@ public class DX12Renderer : IRenderer
         { "rtx_reflections", "Acoustic Droplets & Mirror Pool" },
         { "spectrum_3d", "3D Spectrum Bars" },
         { "spatial_dolby", "Spatial Dolby" },
-        { "water_droplets", "Water Droplet Pool" },
+        { "water_droplets", "Seismic Tectonic Plate" },
         { "matrix_rain", "Matrix Rain" },
         { "waveform_tunnel", "Audio Waveform Tunnel" },
         { "crystal_lattice", "Synthwave Grid" },
@@ -906,7 +906,7 @@ public class DX12Renderer : IRenderer
             "rtx_reflections",    // 23. Acoustic Droplets & Mirror Pool — falling objects + reflective liquid
             "spectrum_3d",        // 24. 3D Spectrum Bars
             "spatial_dolby",      // 25. Spatial Dolby — 3D spatial audio field
-            "water_droplets",    // 26. Water Droplet Pool — 3D ripple physics
+            "water_droplets",    // 26. Seismic Tectonic Plate — seismic wave grid mesh
             "matrix_rain",       // 27. 3D Rain Particles — falling streaks with depth
             "waveform_tunnel",   // 28. Audio Waveform Tunnel — fly through waveform
             "crystal_lattice",   // 29. Synthwave Grid — Tron-style perspective grid
