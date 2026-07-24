@@ -40,7 +40,7 @@
 
 #define PI 3.14159265
 #define PHI 1.61803399
-#define N_SOURCES 16  // 8 bands × L/R
+#define N_SOURCES 8
 #define N_BANDS 8
 #define PLATE_RADIUS 4.0
 #define GRID_SPACING 0.2
@@ -145,59 +145,40 @@ float plateHeight(float2 xz, Epicenter sources[N_SOURCES],
     // Base plate level — slight tectonic drift
     float surface = fbm2_4(xz * 0.15 + time * 0.01) * 0.008 * silence;
 
-    // 16 epicenters — band-specific seismic behavior
+    // 16 epicenters — amplitude-driven standing waves with audio-reactive modulation
     [unroll] for (int n = 0; n < N_SOURCES; n++)
     {
         if (sources[n].amplitude < 0.01) continue;
         float d = length(xz - sources[n].pos);
-        float atten = distAtten(d, 0.03);
-        int bi = sources[n].bandIdx;
+        float atten = distAtten(d, 0.04);
         float freqFrac = sources[n].freqFrac;
         float coherence = lerp(0.3, 1.0, phaseCoh);
 
-        // Band-specific wave behavior
-        float waveSpeed, waveAmp, packetWidth;
-        float seismic = 0.0;
+        // Wave amplitude directly driven by audio — this is the key audio-reactive link
+        float waveAmp = sources[n].amplitude * atten;
 
-        if (bi <= 1) {
-            // Sub-bass / bass: large P-waves, kick-lunge amplification
-            waveSpeed = 3.0;
-            waveAmp = sources[n].amplitude * atten * 0.28 * (1.0 + kickSurge * 1.5);
-            float wavefront = time * waveSpeed * 0.4;
-            float phase = (d - wavefront) / sources[n].wavelength * PI * 2.0;
-            float frontDist = d - wavefront;
-            packetWidth = sources[n].wavelength * 3.0;
-            float packet = exp(-frontDist * frontDist / (packetWidth * packetWidth));
-            seismic = sin(phase) * packet * waveAmp * coherence;
-            seismic += sin(phase * 0.5) * waveAmp * 0.3 * (1.0 + beatPulse * 2.0);
-            // Magma hotspot at epicenter
-            seismic += waveAmp * exp(-d * d * 3.0) * 0.5;
-        } else if (bi <= 4) {
-            // Low-mid / mid: standard P/S waves
-            waveSpeed = lerp(2.5, 1.8, (float(bi) - 2.0) / 2.0);
-            waveAmp = sources[n].amplitude * atten * 0.22;
-            float wavefront = time * waveSpeed * 0.4;
-            float phase = (d - wavefront) / sources[n].wavelength * PI * 2.0;
-            float frontDist = d - wavefront;
-            packetWidth = sources[n].wavelength * 2.5;
-            float packet = exp(-frontDist * frontDist / (packetWidth * packetWidth));
-            seismic = sin(phase) * packet * waveAmp * coherence;
-            seismic += sin(phase * 0.7) * exp(-abs(phase) * 0.12) * waveAmp * coherence * 0.5;
-            seismic += sin(phase * 0.5) * waveAmp * 0.3 * (1.0 + beatPulse * 2.0);
-        } else {
-            // High-mid / presence / brilliance / air: capillary micro-fractures
-            waveSpeed = 1.5 + freqFrac * 1.0;
-            waveAmp = sources[n].amplitude * atten * 0.12;
-            float wavefront = time * waveSpeed * 0.5;
-            float phase = (d - wavefront) / sources[n].wavelength * PI * 2.0;
-            // Tight packet — high-freq ripples don't travel as far
-            packetWidth = sources[n].wavelength * 1.5;
-            float frontDist = d - wavefront;
-            float packet = exp(-frontDist * frontDist / (packetWidth * packetWidth));
-            seismic = sin(phase) * packet * waveAmp * coherence;
-            // Surface crackle — THD-driven micro-fractures
-            seismic += sin(phase * 3.0 + time * 10.0) * waveAmp * 0.3 * (0.5 + thd);
-        }
+        // Phase: distance-based ripple + slow time evolution
+        // Bass = slow long waves, highs = fast short waves
+        float waveSpeed = lerp(0.8, 3.0, freqFrac);
+        float phase = d / sources[n].wavelength * PI * 2.0 - time * waveSpeed;
+
+        // Damped sinusoid — amplitude falls off with distance, waves visible across plate
+        float seismic = sin(phase) * waveAmp * 0.2 * coherence;
+
+        // Secondary harmonic for richer texture
+        seismic += sin(phase * 2.0) * waveAmp * 0.06 * coherence;
+
+        // Beat anticipation — stress buildup modulates wave height
+        seismic *= (1.0 + beatPulse * 1.5);
+
+        // Kick amplification on bass sources
+        if (sources[n].bandIdx <= 1)
+            seismic *= (1.0 + kickSurge * 2.0);
+
+        // Transient — adds sharp spike on highs
+        if (sources[n].bandIdx >= 5 && transient > 0.02)
+            seismic += sin(phase * 3.0) * waveAmp * transient * 0.15;
+
         surface += seismic;
     }
 
@@ -355,34 +336,26 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target
             }
         }
 
-        // ── Color — earth tones with band-specific magma glow ──
+        // ── Color — smooth thermal gradient, not band-discrete ──
         float3 freqCol = hsv(a.hueBase + nearestFreqFrac * a.hueRange, 0.5 * a.satur, 0.9);
         float3 brain = lerp(a.brainCol, a.brainCol2, nearestFreqFrac);
-        brain = lerp(brain, freqCol, 0.3);
+        brain = lerp(brain, freqCol, 0.2);
 
-        // Band-specific magma palette
-        float3 rockDark = float3(0.04, 0.02, 0.008);
-        float3 magmaHot, magmaCool;
-        if (nearestBand <= 1) {
-            // Bass: deep red-orange magma
-            magmaHot = float3(1.0, 0.3, 0.05);
-            magmaCool = float3(0.5, 0.1, 0.02);
-        } else if (nearestBand <= 3) {
-            // Low-mid: orange-amber
-            magmaHot = float3(1.0, 0.5, 0.1);
-            magmaCool = float3(0.4, 0.15, 0.03);
-        } else if (nearestBand <= 5) {
-            // Mid-high: yellow-white hot
-            magmaHot = float3(1.0, 0.8, 0.3);
-            magmaCool = float3(0.3, 0.2, 0.05);
-        } else {
-            // Highs: white-blue friction sparks
-            magmaHot = float3(0.9, 0.85, 1.0);
-            magmaCool = float3(0.1, 0.08, 0.15);
-        }
-        float3 magmaGlow = lerp(magmaCool, magmaHot, clamp(surfH * 3.0 + 0.2, 0.0, 1.0));
-        float3 gridCol = lerp(rockDark, magmaGlow, 0.4);
-        gridCol = lerp(gridCol, brain, 0.2);
+        // Organic thermal gradient: dark rock → deep red → orange → yellow → white-hot
+        float thermal = clamp(surfH * 4.0 + 0.15, 0.0, 1.0);
+        float3 rockDark = float3(0.03, 0.015, 0.006);
+        float3 deepRed = float3(0.35, 0.05, 0.01);
+        float3 orange = float3(0.8, 0.2, 0.03);
+        float3 yellow = float3(1.0, 0.6, 0.1);
+        float3 whiteHot = float3(1.0, 0.9, 0.5);
+
+        float3 magmaGlow = lerp(rockDark, deepRed, smoothstep(0.0, 0.25, thermal));
+        magmaGlow = lerp(magmaGlow, orange, smoothstep(0.25, 0.5, thermal));
+        magmaGlow = lerp(magmaGlow, yellow, smoothstep(0.5, 0.75, thermal));
+        magmaGlow = lerp(magmaGlow, whiteHot, smoothstep(0.75, 1.0, thermal));
+
+        float3 gridCol = lerp(rockDark, magmaGlow, 0.5);
+        gridCol = lerp(gridCol, brain, 0.15);
 
         // Phase coherence → fault alignment
         float coherence = lerp(0.3, 1.0, dspPhaseCoh);
