@@ -187,9 +187,9 @@ shaders/
 - 🔴 **Rewrite**: Visual approach needs complete reimagining for multi-layer composite pipeline
 
 ### Current Tally
-- ✅ **Good as-is**: 16 HUD modes (1, 2, 3, 4, 9, 10, 12, 13, 15, 16, 17, 19, 21, 22, 25, 26)
+- ✅ **Good as-is**: 17 HUD modes (1, 2, 3, 4, 9, 10, 11, 12, 13, 15, 16, 17, 19, 21, 22, 25, 26)
 - 🟡 **Needs DSP/tuning**: 0 modes (deferred)
-- 🔴 **Rewrite**: 14 HUD modes (5, 6, 7, 8, 11, 14, 18, 20, 23, 24, 27, 28, 29, 30)
+- 🔴 **Rewrite**: 13 HUD modes (5, 6, 7, 8, 14, 18, 20, 23, 24, 27, 28, 29, 30)
 
 ---
 
@@ -295,7 +295,6 @@ shaders/
 **Concept**: 3D Mandelbox fractal with 8 iterations, orbit trap coloring from spectrum, 64-step raymarch
 **DSP**: Not integrated
 **Audio mapping**: Bass→fold scale, kick→fold morph, beat→zoom, transient→dimensional glitch
-**Rewrite approach**: Reimagine for multi-layer pipeline
 
 ### Mode 13: Neural Network — `dx_neural_network.hlsl`
 **Display name**: Synaptic Life
@@ -470,14 +469,13 @@ Needs-DSP modes get additive DSP complement. Rewrite modes get reimplemented for
 - [x] Mode 21: Audio Tessellation — bands→cell zones, LUFS→displacement boost, crest→fault sharpness
 - [x] Mode 25: Spatial Dolby — phase→spatial coherence, LUFS→field intensity, bands→spatial zones
 
-**Batch 2 — Full Rewrites (🔴 Rewrite — 15 modes)**:
+**Batch 2 — Full Rewrites (🔴 Rewrite — 13 modes)**:
 - [ ] Mode 3: Particle Flow — reimagine for multi-layer, SkiaSharp particle overlay
 - [ ] Mode 4: Waveform — redo Cosmic Bloom for composite pipeline (Layer 0 + shared postfx)
 - [ ] Mode 5: Sphere — reimagine, consider Layer 1 overlay
 - [ ] Mode 6: Aurora — reimagine for multi-layer pipeline
 - [ ] Mode 7: DNA Helix — reimagine for multi-layer pipeline
-- [ ] Mode 10: Kaleidoscope — reimagine for multi-layer pipeline
-- [ ] Mode 12: Fractal Dimensions — reimagine for multi-layer pipeline
+- [x] Mode 10: Kaleidoscope — ✅ Rewritten (per-band fractal displacement, DSP integrated, 60fps)
 - [ ] Mode 13: Neural Network — reimagine, SkiaSharp neuron overlay
 - [ ] Mode 17: Crystal (Black Hole) — reimagine, differentiate from mode 8
 - [ ] Mode 19: Galaxy — reimagine for multi-layer pipeline

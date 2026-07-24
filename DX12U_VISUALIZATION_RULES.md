@@ -347,3 +347,73 @@ return float4(col, 1.0);
 6. **Stereo spatial behavior**: L/R produces visible spatial separation, not just brightness changes
 7. **Dynamic range response**: quiet passages are dark and minimal, loud passages are full and bright — driven by `a.gated`, `a.envelope`, `a.brightness`
 8. **No block colors, no generic spheres, no glyph-like shapes** — everything is field-derived, wave-derived, or physically motivated
+
+---
+
+## 3D Spatial Audio Math
+
+Use the following formulas for 3D spatial coordinate computation, audio attenuation, and HLSL vertex/density deformation.
+
+### 1. Relative 3D Vector & Distance
+
+Given Listener Position `L = (Lx, Ly, Lz)` and Audio Source `S = (Sx, Sy, Sz)`:
+
+```
+Relative Vector V = S - L
+Distance d = sqrt(Vx^2 + Vy^2 + Vz^2)
+Normalized Direction N = V / d
+```
+
+### 2. Distance Attenuation (Inverse Square / Clamped)
+
+```
+Gain A(d) = 1.0 / (1.0 + k * d^2)        [k = attenuation factor]
+Clamped Range Gain = clamp(1.0 - (d / d_max), 0.0, 1.0)
+```
+
+### 3. 3D Spherical Coordinates (Azimuth & Elevation)
+
+```
+Azimuth  theta = atan2(Vx, Vz)
+Elevation phi = asin(Vy / d)
+```
+
+### 4. 3D HLSL Vertex / Mesh Deformation Shader Math
+
+For vertex position `P = (x, y, z)` displaced by 3D audio source `S` with frequency `f` and wave speed `c`:
+
+```
+Spatial Wavenumber k_w = (2 * PI * f) / c
+Phase Shift phi_t = k_w * d - omega * time
+
+Displacement Vector D_3D = Normal_v * sin(phi_t) * A(d) * Intensity
+P_final = P + D_3D
+```
+
+### HLSL CBuffer & Vector Math Snippet
+
+```hlsl
+// Constant Buffer Layout for 3D Spatial Audio
+cbuffer SpatialAudioBuffer : register(b0)
+{
+    float3 g_SourcePos;     // 3D Audio Source (X, Y, Z)
+    float  g_Attenuation;   // Computed gain factor A(d)
+    float3 g_ListenerPos;   // 3D Listener Position (X, Y, Z)
+    float  g_Frequency;     // Peak frequency for spatial ripple
+    float3 g_SpatialVector; // Normalized direction vector (N)
+    float  g_Time;          // Global render time
+};
+
+// 3D Spatial Deformation Function
+float3 Apply3DSpatialWave(float3 worldPos, float3 worldNormal)
+{
+    float dist = distance(worldPos, g_SourcePos);
+    float wave = sin(dist * g_Frequency - g_Time * 4.0);
+
+    // Attenuation falls off smoothly over 3D euclidean distance
+    float spatialGain = g_Attenuation / (1.0 + 0.1 * dist * dist);
+
+    // Displace vertex along normal scaled by 3D spatial gain
+    return worldPos + (worldNormal * wave * spatialGain);
+}
+```
