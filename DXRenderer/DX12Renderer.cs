@@ -125,7 +125,7 @@ public class DX12Renderer : IRenderer
         { "particle_storm", "Particle Storm" },
         { "crystal", "Spectrum Black Hole" },
         { "terrain", "Spectrum Terrain" },
-        { "galaxy", "Spectrum Galaxy" },
+        { "galaxy", "Spacetime Gravity Waves" },
         { "wave_tessellation", "Wave Pool + Tessellation" },
         { "audio_tessellation", "Audio Tessellation" },
         { "compute_shaders", "Acoustic Ferrofluid" },
@@ -899,7 +899,7 @@ public class DX12Renderer : IRenderer
             "particle_storm",     // 16. Particle Storm — vortex + lightning
             "crystal",            // 17. Spectrum Black Hole — gravitational lensing + accretion disk
             "terrain",            // 18. Spectrum Terrain — ridged noise mountains flyover
-            "galaxy",             // 19. Spectrum Galaxy — volumetric spiral arms + core bulge
+            "galaxy",             // 19. Spacetime Gravity Waves — gravitational wave fabric
             "wave_tessellation",  // 20. Wave Pool + Tessellation
             "audio_tessellation", // 21. Audio Tessellation — Voronoi terrain with audio
             "compute_shaders",    // 22. Compute Shaders — 3D raymarched vortex
