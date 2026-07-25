@@ -146,6 +146,6 @@ float4 main(PSInput input) : SV_TARGET {
 
     // HDR brightness limiter
     float maxC = max(col.r, max(col.g, col.b));
-    if (maxC > 1.5) col *= 1.5 / maxC;
+    if (maxC > 1.2) col *= 1.2 / maxC;
     return float4(col, 1);
 }

@@ -167,7 +167,7 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
     col += a.brainCol2 * kickFlash * a.bloomActive * (1.0 - a.isSilent);
 
     // ── Foreground overlays ──
-    col += standardOverlays(p, length(p), a) * 0.25;
+    col += standardOverlays(p, length(p), a) * 0.025;
 
     // ── Post-processing ──
     // ── Brightness limiter — prevent bloom blowout ──

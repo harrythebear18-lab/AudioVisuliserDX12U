@@ -426,7 +426,7 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target
 
     // ── HDR brightness limiter ──
     float maxC = max(col.r, max(col.g, col.b));
-    if (maxC > 1.5) col *= 1.5 / maxC;
+    if (maxC > 1.2) col *= 1.2 / maxC;
 
     return float4(col, 1.0);
 }

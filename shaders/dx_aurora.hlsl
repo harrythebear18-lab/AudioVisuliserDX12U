@@ -125,7 +125,7 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target
     col += accumCol * (1.0 - a.isSilent);
 
     // ---- shared compositing layers only ----
-    col += standardOverlays(p, r, a) * 0.2;
+    col += standardOverlays(p, r, a) * 0.02;
 
     // LUFS additive exposure (DSP complements, never replaces brain)
     col *= 0.85 + lufsNormalized() * 0.3;

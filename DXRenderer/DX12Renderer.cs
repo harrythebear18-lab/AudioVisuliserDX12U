@@ -136,6 +136,26 @@ public class DX12Renderer : IRenderer
         { "matrix_rain", "Mandelbulb Fractal" },
         { "waveform_tunnel", "Audio Waveform Tunnel" },
         { "crystal_lattice", "Synthwave Grid" },
+        { "space_plasma", "Space Plasma Field" },
+        { "gravitational_waves", "Gravitational Space Waves" },
+        { "fluid_dynamics", "Fluid Dynamics" },
+        { "lightning_storm", "Lightning Storm" },
+        { "neon_cityscape", "Neon Cityscape" },
+        { "spectrum_waterfall", "Spectrum Waterfall" },
+        { "cosmic_web", "Cosmic Web" },
+        { "laser_show", "Laser Show" },
+        { "neural_synapse", "Neural Synapse Storm" },
+        { "hologram_projector", "Acoustic Hologram Projector" },
+        { "quantum_interferometer", "Quantum Field Interferometer" },
+        { "aurora_cathedral", "Spectral Aurora Cathedral" },
+        { "gravitational_lens", "Gravitational Lens Observatory" },
+        { "phonon_crystal", "Phonon Crystal Lattice" },
+        { "cymatic_chamber", "Cymatic Resonance Chamber" },
+        { "sonic_topology", "Sonic Topology Mapper" },
+        { "particle_hologram", "Acoustic Particle Hologram" },
+        { "freq_nebula", "Sonic Sphereworld" },
+        { "wave_field", "Spatiotemporal Wave Field" },
+        { "fractal_explorer", "Fractal Dimension Explorer" },
     };
     private int _currentMode;
     private bool _shouldResetGPU = false;
@@ -615,7 +635,7 @@ public class DX12Renderer : IRenderer
         bool bloomReady = _bloomEnabled && _bloomExtractPSO != null && _bloomBlurHPSO != null && _bloomBlurVPSO != null && _bloomCombinePSO != null;
         bool hdrPipelineReady = bloomReady && _postfxPSO != null && _tonemapPSO != null;
         string fallbackState = _compositePSO == null ? "unavailable" : hdrPipelineReady ? "available (inactive)" : "active";
-        DebugLogger.Info($"[Pipeline] Startup validation: modes={_modeNames.Count}/30, bloom={(bloomReady ? "loaded" : "failed")}, postfx={(_postfxPSO != null ? "loaded" : "failed")}, tonemap={(_tonemapPSO != null ? "loaded" : "failed")}, overlay={(_overlayPSO != null ? "loaded" : "not configured")}, skia={(_skiaPSO != null && _skiaEnabled ? "loaded" : "disabled")}, fallback={fallbackState}");
+        DebugLogger.Info($"[Pipeline] Startup validation: modes={_modeNames.Count}/50, bloom={(bloomReady ? "loaded" : "failed")}, postfx={(_postfxPSO != null ? "loaded" : "failed")}, tonemap={(_tonemapPSO != null ? "loaded" : "failed")}, overlay={(_overlayPSO != null ? "loaded" : "not configured")}, skia={(_skiaPSO != null && _skiaEnabled ? "loaded" : "disabled")}, fallback={fallbackState}");
 
         // Create SRV descriptors in the CBV/SRV/UAV heap
         // Layout (8 SRVs): [0]spectrum, [1]layer0, [2]layer1, [3]bloom0, [4]bloom1, [5]feedback0(null), [6]feedback1(null), [7]noise(null)
@@ -833,17 +853,68 @@ public class DX12Renderer : IRenderer
         return bytecode;
     }
 
+    private static string GetShaderCacheDir()
+    {
+        string cacheDir = Path.Combine(AppContext.BaseDirectory, "shader_cache");
+        Directory.CreateDirectory(cacheDir);
+        return cacheDir;
+    }
+
+    private static string ComputeSourceHash(string source, string target)
+    {
+        using var sha = System.Security.Cryptography.SHA256.Create();
+        byte[] hashBytes = sha.ComputeHash(System.Text.Encoding.UTF8.GetBytes(source + "|" + target));
+        return Convert.ToHexString(hashBytes)[..16];
+    }
+
+    private static byte[]? TryLoadCachedShader(string fileName, string target, string sourceHash)
+    {
+        try
+        {
+            string cacheFile = Path.Combine(GetShaderCacheDir(), $"{Path.GetFileNameWithoutExtension(fileName)}_{target}_{sourceHash}.dxbc");
+            if (File.Exists(cacheFile))
+            {
+                return File.ReadAllBytes(cacheFile);
+            }
+        }
+        catch { }
+        return null;
+    }
+
+    private static void SaveCachedShader(string fileName, string target, string sourceHash, byte[] bytecode)
+    {
+        try
+        {
+            string cacheFile = Path.Combine(GetShaderCacheDir(), $"{Path.GetFileNameWithoutExtension(fileName)}_{target}_{sourceHash}.dxbc");
+            File.WriteAllBytes(cacheFile, bytecode);
+        }
+        catch { }
+    }
+
     private static byte[] CompileShader(string source, string entryPoint, string fileName, string dxcTarget, string fxcTarget)
     {
         InitDXC();
 
         if (_dxcCompiler != null)
         {
+            string sourceHash = ComputeSourceHash(source, dxcTarget);
+
+            // Try cache first
+            byte[]? cached = TryLoadCachedShader(fileName, dxcTarget, sourceHash);
+            if (cached != null)
+            {
+                DebugLogger.Info($"[DX12U] Cache hit: {fileName} ({cached.Length} bytes)");
+                return cached;
+            }
+
             try
             {
                 byte[]? dxcResult = CompileWithDXC(source, entryPoint, dxcTarget, fileName);
                 if (dxcResult != null)
+                {
+                    SaveCachedShader(fileName, dxcTarget, sourceHash, dxcResult);
                     return dxcResult;
+                }
             }
             catch (Exception e)
             {
@@ -910,6 +981,26 @@ public class DX12Renderer : IRenderer
             "matrix_rain",       // 27. Mandelbulb Fractal — audio-reactive 3D raymarched fractal
             "waveform_tunnel",   // 28. Audio Waveform Tunnel — fly through waveform
             "crystal_lattice",   // 29. Synthwave Grid — Tron-style perspective grid
+            "space_plasma",      // 30. Space Plasma Field — volumetric plasma with EM field math
+            "gravitational_waves",// 31. Gravitational Space Waves — GW strain tensor fabric
+            "fluid_dynamics",    // 32. Fluid Dynamics — Navier-Stokes volumetric fluid
+            "lightning_storm",   // 33. Lightning Storm — dielectric breakdown arcs
+            "neon_cityscape",    // 34. Neon Cityscape — synthwave skyline + reflections
+            "spectrum_waterfall",// 35. Spectrum Waterfall — 3D scrolling spectrogram
+            "cosmic_web",        // 36. Cosmic Web — dark matter filament network
+            "laser_show",        // 37. Laser Show — concert laser beam patterns
+            "neural_synapse",    // 38. Neural Synapse Storm — 3D neural network with synapse firing
+            "hologram_projector",// 39. Acoustic Hologram Projector — volumetric hologram table
+            "quantum_interferometer", // 40. Quantum Field Interferometer — wave-particle duality
+            "aurora_cathedral",  // 41. Spectral Aurora Cathedral — volumetric aurora curtains
+            "gravitational_lens",// 42. Gravitational Lens Observatory — black hole + accretion disk
+            "phonon_crystal",    // 43. Phonon Crystal Lattice — 3D phononic crystal wave propagation
+            "cymatic_chamber",   // 44. Cymatic Resonance Chamber — 3D Chladni patterns
+            "sonic_topology",    // 45. Sonic Topology Mapper — 4D topological manifold
+            "particle_hologram", // 46. Acoustic Particle Hologram — GPU particles forming 3D shapes
+            "freq_nebula",       // 47. Sonic Sphereworld — SDF planet with audio terrain, atmosphere, meteors
+            "wave_field",        // 48. Spatiotemporal Wave Field — 3D wave equation with audio sources
+            "fractal_explorer",  // 49. Fractal Dimension Explorer — morphing 3D Mandelbulb
         };
 
         foreach (var mode in modes)

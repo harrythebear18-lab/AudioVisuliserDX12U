@@ -149,7 +149,7 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
     col += hsv(a.hueCenter, 0.3, 1.0) * a.beatAnt * 0.05 * wall * (1.0 - a.isSilent);
 
     // Foreground overlays
-    col += standardOverlays(p, r, a) * 0.15;
+    col += standardOverlays(p, r, a) * 0.02;
 
     // Brightness limiter — prevent bloom blowout
     float maxChannel = max(col.r, max(col.g, col.b));

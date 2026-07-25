@@ -197,7 +197,7 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
     }
 
     // ── Foreground overlays ──
-    col += standardOverlays(p, r, a) * 0.25;
+    col += standardOverlays(p, r, a) * 0.025;
 
     // ── Post-processing ──
     // ── Brightness limiter — prevent bloom blowout ──
