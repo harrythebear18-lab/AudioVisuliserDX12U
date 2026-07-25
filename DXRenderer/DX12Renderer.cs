@@ -143,7 +143,7 @@ public class DX12Renderer : IRenderer
         { "neon_cityscape", "Neon Cityscape" },
         { "spectrum_waterfall", "Spectrum Waterfall" },
         { "cosmic_web", "Cosmic Web" },
-        { "laser_show", "Laser Show" },
+        { "laser_show", "Resonance Field" },
         { "neural_synapse", "Neural Synapse Storm" },
         { "hologram_projector", "Acoustic Hologram Projector" },
         { "quantum_interferometer", "Quantum Field Interferometer" },
@@ -988,7 +988,7 @@ public class DX12Renderer : IRenderer
             "neon_cityscape",    // 34. Neon Cityscape — synthwave skyline + reflections
             "spectrum_waterfall",// 35. Spectrum Waterfall — 3D scrolling spectrogram
             "cosmic_web",        // 36. Cosmic Web — dark matter filament network
-            "laser_show",        // 37. Laser Show — concert laser beam patterns
+            "laser_show",        // 37. Resonance Field — 3D Chladni standing wave patterns at spatial audio positions
             "neural_synapse",    // 38. Neural Synapse Storm — 3D neural network with synapse firing
             "hologram_projector",// 39. Acoustic Hologram Projector — volumetric hologram table
             "quantum_interferometer", // 40. Quantum Field Interferometer — wave-particle duality
