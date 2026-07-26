@@ -235,12 +235,12 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target
                 float intensity = pings[idx].energy * decay * (1.0 + lufs * 0.2);
                 float depthFade = exp(-pingDepth * 0.06);
 
-                // White-hot core
-                col += float3(0.9, 0.95, 1.0) * coreGlow * intensity * depthFade * 1.5 * silence;
+                // White-hot core (brightness-limited)
+                col += float3(0.9, 0.95, 1.0) * coreGlow * intensity * depthFade * 0.8 * silence;
                 // Colored body
-                col += pingCol * midGlow * intensity * depthFade * 0.8 * silence;
+                col += pingCol * midGlow * intensity * depthFade * 0.5 * silence;
                 // Soft halo
-                col += pingCol * haloGlow * intensity * depthFade * 0.2 * silence;
+                col += pingCol * haloGlow * intensity * depthFade * 0.12 * silence;
             }
         }
     }
@@ -321,9 +321,9 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target
     // ── Standard overlays — surface mode ──
     col += standardOverlays(p, r, a) * 0.02;
 
-    // ── HDR limiter ──
+    // ── HDR brightness limiter ──
     float maxC = max(col.r, max(col.g, col.b));
-    if (maxC > 1.14) col *= 1.14 / maxC;
+    if (maxC > 0.85) col *= 0.85 / maxC;
 
     col *= silence;
 

@@ -149,7 +149,7 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target
 
     // ── Camera — inside the crystal ──
     float FOV = 0.7;
-    float camAng = a.section * 0.5 + a.stereoBal * 0.2 + Time * 0.02 * a.motSpeed;
+    float camAng = a.section * 0.5 + a.stereoBal * 0.2;
     float3 camPos = float3(sin(camAng) * 3.0, 1.0 + a.stereoDiff * 0.1, cos(camAng) * 3.0);
     float3 camTarget = float3(0, 0, 0);
     float3 fwd = normalize(camTarget - camPos);
@@ -221,9 +221,9 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target
         float intensity = atoms[k].energy * (1.0 + lufs * 0.2);
         float depthFade = exp(-atomDepth * 0.08);
 
-        col += float3(0.9, 0.95, 1.0) * coreGlow * intensity * depthFade * 1.5 * silence;
-        col += atoms[k].color * midGlow * intensity * depthFade * 0.6 * silence;
-        col += atoms[k].color * haloGlow * intensity * depthFade * 0.15 * silence;
+        col += float3(0.9, 0.95, 1.0) * coreGlow * intensity * depthFade * 0.4 * silence;
+        col += atoms[k].color * midGlow * intensity * depthFade * 0.3 * silence;
+        col += atoms[k].color * haloGlow * intensity * depthFade * 0.08 * silence;
     }
 
     // ── Beat ring ──

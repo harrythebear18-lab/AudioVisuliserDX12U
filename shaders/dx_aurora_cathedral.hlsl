@@ -171,7 +171,7 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target
 
     // ── Camera — looking up at aurora from cathedral floor ──
     float FOV = 0.8;
-    float camAng = a.section * 0.3 + a.stereoBal * 0.15 + Time * 0.02 * a.motSpeed;
+    float camAng = a.section * 0.3 + a.stereoBal * 0.15;
     float3 camPos = float3(sin(camAng) * 1.0, 0.0, cos(camAng) * 1.0);
     float3 camTarget = float3(0, 2.5, 0);
     float3 rd = cameraRay(camPos, camTarget, float2(-p.x, -p.y), FOV);
@@ -186,7 +186,7 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target
     float transmittance = 1.0;
     float stepSize = 0.1;
 
-    [loop] for (int i = 0; i < 24; i++) {
+    [loop] for (int i = 0; i < 16; i++) {
         float3 sp = camPos + rd * t;
         if (sp.y > 5.0 || length(sp.xz) > 4.0) break;
 
@@ -195,11 +195,11 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target
 
         if (density > 0.003) {
             float3 pointCol = auroraColor(sp, curtains, a);
-            pointCol *= density * (0.5 + envelope * 0.5) * (1.0 + lufs * 0.2);
+            pointCol *= density * (0.8 + envelope * 0.5) * (1.0 + lufs * 0.3);
 
-            float sigma = density * 0.2 + 0.01;
+            float sigma = density * 0.15 + 0.005;
             transmittance *= exp(-sigma * stepSize);
-            accum += pointCol * transmittance * stepSize * 2.0;
+            accum += pointCol * transmittance * stepSize * 3.0;
         }
         t += stepSize;
     }
@@ -252,9 +252,9 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target
     // ── Standard overlays ──
     col += standardOverlays(p, r, a) * 0.02;
 
-    // ── HDR limiter — dark volumetric ──
+    // ── HDR limiter ──
     float maxC = max(col.r, max(col.g, col.b));
-    if (maxC > 1.2) col *= 1.2 / maxC;
+    if (maxC > 1.3) col *= 1.3 / maxC;
 
     col *= silence;
 

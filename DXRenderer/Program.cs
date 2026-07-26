@@ -59,7 +59,7 @@ static class Program
         {
             if (renderer != null && modeCombo.SelectedIndex >= 0 && modeCombo.SelectedIndex < renderer.ModeCount)
             {
-                renderer.SetMode(modeCombo.Items[modeCombo.SelectedIndex].ToString()!);
+                renderer.SetMode(renderer.GetModeName(modeCombo.SelectedIndex));
             }
             // Refocus the form so keyboard hotkeys keep working
             form.Focus();

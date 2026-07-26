@@ -1,192 +1,386 @@
-// Mode 37: Cosmic Web — 3D dark matter filament network
-// Adopted to Spatial Pipeline architecture: 48 SpEmitters on golden-ratio sphere.
-// Bass = node mass/luminosity, mids = filament connectivity, highs = micro-filaments/shimmer.
-// Stereo balance = web rotation, stereo width = filament stretch.
-// Phase correlation = filament alignment/coherence. Beat = cosmic shockwave.
-// Kick = supernova. Transient = gravitational perturbation.
-// DSP: LUFS→node emission, crest→filament sharpness, THD→peculiar velocities, phase→alignment.
+// HUD 36: Gravitational Wavefield — Spectrum Gravity Waves
+// 3D spacetime fabric grid/mesh deformed by traveling gravitational waves.
+// 8 wave sources at golden-ratio positions emit expanding circular ripples
+// that propagate across the ENTIRE fabric and interfere with each other.
+// Grid lines are clearly visible as a glowing wireframe mesh.
+// Beat = omnidirectional gravitational wave event. Kick = spacetime tear.
+//
+// Uses ALL brain telemetry: bands, beat, kick, transient, stereo, phase,
+// THD, LUFS, envelope, speech, calm, phrase, section, brightness, etc.
+//
+// HDR output to Layer 0. No local postfx. Pipeline owns bloom/tonemap.
 
 #include "include/audio_cb.hlsl"
 #include "include/dsp_cb.hlsl"
 #include "include/color_utils.hlsl"
 #include "include/noise.hlsl"
-#include "include/raymarch.hlsl"
 #include "include/audio_reactive.hlsl"
 #include "include/layers.hlsl"
-#include "include/spatial_pipeline.hlsl"
 
-#define PHI 1.618
+#define PI 3.14159265
+#define PHI 1.61803399
+#define N_SOURCES 8
+#define FABRIC_RADIUS 4.5
+#define GRID_SPACING 0.28
 
-float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
+// ── Wave source struct ──
+struct WaveSource {
+    float2 pos;         // xz position on fabric
+    float amplitude;
+    float wavelength;
+    float intensity;
+    float pan;
+    float freqFrac;
+};
+
+// ── Golden ratio distribution for wave sources ──
+float2 sourceBasePos(int idx, float radius, float stereoBal, float stereoWid)
+{
+    float bt = float(idx) / float(N_SOURCES - 1);
+    float ang = float(idx) * PHI * PI * 2.0 + stereoBal * PI;
+    float r = lerp(0.3, radius * 0.85, bt);
+    return float2(cos(ang) * r, sin(ang) * r) * (0.8 + stereoWid * 0.3);
+}
+
+// ── Distance attenuation — inverse square ──
+float distAtten(float d, float k)
+{
+    return 1.0 / (1.0 + k * d * d);
+}
+
+// ── Compute 8 wave sources using audioSimElement + ALL brain data ──
+void computeSources(out WaveSource sources[N_SOURCES], AudioData a,
+                    float crest, float lufs)
+{
+    float dspBands[8] = { DspBand0, DspBand1, DspBand2, DspBand3,
+                          DspBand4, DspBand5, DspBand6, DspBand7 };
+    float fabricR = FABRIC_RADIUS * (0.8 + a.stereoWid * 0.3);
+
+    [unroll] for (int n = 0; n < N_SOURCES; n++)
+    {
+        AudioElement e = audioSimElement(n, N_SOURCES, a);
+
+        sources[n].pos = sourceBasePos(n, fabricR, a.stereoBal, a.stereoWid);
+        sources[n].pos += e.transientScatter * 0.3;
+        sources[n].pan = e.pan;
+        sources[n].freqFrac = e.freqFrac;
+        sources[n].intensity = e.intensity;
+
+        // Base amplitude from audioSimElement + DSP additive
+        float dspAdd = dspBands[n] * 0.12;
+        float amp = e.amplitude + dspAdd;
+
+        // Enrich with ALL brain dynamics — each source gets unique character
+        amp += a.beatAnt * (0.5 + e.freqFrac * 0.5) * 0.15;
+        amp += a.tempoPulse * lerp(0.1, 0.05, e.freqFrac);
+        amp += a.punch * smoothstep(2.0, 0.0, float(n)) * 0.3;
+        amp += a.dynamic * lerp(0.08, 0.03, e.freqFrac);
+        amp += a.glow * 0.05;
+        amp += sin(a.phraseBeat * PI * 2.0 + float(n) * 0.3) * 0.1 + 0.1;
+        amp += a.section * a.sectionConf * 0.1;
+
+        // Speech mode emphasizes vocal bands (b3-b5)
+        float vocalW = smoothstep(2.5, 3.5, float(n)) * (1.0 - smoothstep(5.0, 6.0, float(n)));
+        amp += a.speechMode * vocalW * 0.3;
+
+        // Calm mode reduces floor
+        amp *= (1.0 - a.calmMode * 0.5);
+        // Visual modifiers
+        amp *= (0.7 + a.brightness * 0.3) * (0.8 + a.effectInt * 0.2) * a.barScale;
+        // LUFS additive
+        amp *= (1.0 + lufs * 0.2);
+        // Crest sharpness
+        amp *= (1.0 + crest * 0.3);
+
+        sources[n].amplitude = clamp(amp, 0.0, 1.5);
+        sources[n].wavelength = lerp(3.5, 0.4, e.freqFrac);
+    }
+}
+
+// ── Spacetime fabric heightfield — traveling waves from 8 sources ──
+// Waves propagate across the ENTIRE fabric with distance attenuation.
+// No culling — every source contributes everywhere, creating interference.
+float fabricHeight(float2 xz, WaveSource sources[N_SOURCES],
+                   float time, float beatPulse, float beatPhase,
+                   float kickSurge, float transient, float thd, float envelope,
+                   float lufs, float phaseCoh, float silence)
+{
+    float r = length(xz);
+    if (r > FABRIC_RADIUS) return -1.0;
+
+    // Base fabric level
+    float surface = (0.01 + lufs * 0.015) * silence;
+
+    // 8 wave sources — expanding circular waves with interference
+    [unroll] for (int n = 0; n < N_SOURCES; n++)
+    {
+        if (sources[n].amplitude < 0.01) continue;
+        float d = length(xz - sources[n].pos);
+        float atten = distAtten(d, 0.1);
+
+        // Wave phase — expanding ripple traveling outward
+        float waveSpeed = 1.5 + sources[n].freqFrac * 2.0;
+        float phase = (d - time * waveSpeed * 0.3) / sources[n].wavelength * PI * 2.0;
+
+        // Wave amplitude with distance attenuation
+        float waveAmp = sources[n].amplitude * atten * 0.15;
+
+        // Phase coherence → wave coherence
+        float coherence = lerp(0.3, 1.0, phaseCoh);
+        float wave = sin(phase) * waveAmp * coherence;
+
+        // Beat anticipation — pre-beat wave tension
+        wave += sin(phase * 0.5) * waveAmp * 0.3 * (1.0 + beatPulse * 2.0);
+
+        // THD — surface roughness
+        wave += sin(phase * 3.0 + thd * 10.0) * waveAmp * thd * 0.1;
+
+        surface += wave;
+    }
+
+    // Beat — omnidirectional gravitational wave event
+    float beatWave = beatPulse * 0.08 * sin(r * 4.0 - beatPhase * PI * 4.0) *
+                     smoothstep(FABRIC_RADIUS, 0.0, r) * silence;
+    surface += beatWave;
+
+    // Kick — spacetime tear (localized rupture)
+    surface -= kickSurge * 0.12 * exp(-r * r * 2.0) * silence;
+
+    // Transient — quantum fluctuations
+    if (transient > 0.02)
+        surface += transient * 0.02 * sin(xz.x * 30.0 + xz.y * 28.0 + time * 40.0) *
+                   smoothstep(FABRIC_RADIUS, 0.0, r) * silence * (0.5 + thd);
+
+    // Envelope swell
+    surface += envelope * 0.008 * smoothstep(FABRIC_RADIUS, 0.0, r) * silence;
+
+    // Fabric edge — curve down into void
+    surface -= smoothstep(FABRIC_RADIUS * 0.7, FABRIC_RADIUS, r) * 0.3;
+
+    return surface;
+}
+
+// ── Project 3D world point to screen space ──
+float2 projectWorld(float3 worldPos, float3 camPos, float3 fwd, float3 right, float3 up, float fov)
+{
+    float3 toObj = worldPos - camPos;
+    float depth = dot(toObj, fwd);
+    if (depth < 0.01) depth = 0.01;
+    return float2(dot(toObj, right) / (depth * fov), dot(toObj, up) / (depth * fov));
+}
+
+// ── Distance from point to line segment in 2D ──
+float distToSeg2D(float2 p, float2 a, float2 b, out float2 closest)
+{
+    float2 ab = b - a;
+    float lenSq = dot(ab, ab);
+    if (lenSq < 0.0001) { closest = a; return length(p - a); }
+    float t = clamp(dot(p - a, ab) / lenSq, 0.0, 1.0);
+    closest = a + ab * t;
+    return length(p - closest);
+}
+
+float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target
+{
     AudioData a = extractAudio();
     float2 p = screenToAspect(uv);
     float r = length(p);
     float silence = 1.0 - a.isSilent;
 
-    float lufs = lufsNormalized();
-    float crest = crestFactorNormalized();
-    float thd = thdNormalized();
-    float phaseCoh = phaseCoherence();
+    // ── DSP additive ──
+    float dspLUFS = lufsNormalized();
+    float dspCrest = crestFactorNormalized();
+    float dspTHD = thdNormalized();
+    float dspPhaseCoh = phaseCoherence();
 
-    float bands[8] = { a.b0, a.b1, a.b2, a.b3, a.b4, a.b5, a.b6, a.b7 };
+    // ── Audio dynamics ──
     float beatPulse = a.beat * a.tempoConf;
     float kickSurge = a.kick * a.kickConf * exp(-a.beatPhase * 3.0);
-    float transientAmt = a.transient;
-    float envelope = a.envelope;
 
-    // ── Camera — drifting through the web, VR-friendly 360° ──
-    float camAng = a.section * 0.8 + a.stereoBal * 0.2 + Time * 0.03 * a.motSpeed;
-    float3 camPos = float3(sin(camAng) * 4.0, 1.0 + a.stereoDiff * 0.15, cos(camAng) * 4.0);
-    SpCamera cam = spCamera(camPos, float3(0, 0, 0), 0.7);
+    // ── Camera — above fabric, low angle looking across to horizon ──
+    float FOV = 0.7;
+    float camAng = a.section * 0.1 + a.stereoBal * 0.15;
+    float camDist = 5.0;
+    float camHeight = 1.6 + a.stereoDiff * 0.15;
+    float3 camPos = float3(sin(camAng) * camDist, camHeight, cos(camAng) * camDist);
+    float3 camTarget = float3(0.0, 0.0, 0.0);
+    float3 fwd = normalize(camTarget - camPos);
+    float3 right = normalize(cross(fwd, float3(0, 1, 0)));
+    float3 up = cross(right, fwd);
+    float3 rd = normalize(fwd + p.x * right * FOV + p.y * up * FOV);
 
-    // ── Background — deep cosmic void with CMB ──
-    float3 col = float3(0.001, 0.001, 0.005) * silence;
-    col += starfield(uv, a) * 0.04;
-    col += godRays(p, r, a) * 0.04 * silence;
+    // ── Compute wave sources from ALL brain data ──
+    WaveSource sources[N_SOURCES];
+    computeSources(sources, a, dspCrest, dspLUFS);
 
-    float cmb = fbm2_4(uv * 8.0) * 0.005 * (1.0 + lufs * 0.1);
-    col += float3(0.1, 0.05, 0.15) * cmb * silence;
+    // ── Background — deep spacetime void ──
+    float3 col = float3(0.002, 0.001, 0.004) * silence;
+    col += starfield(uv, a) * 0.015;
+    float nebula = fbm2_4(p * 0.8 + Time * 0.003 * a.motSpeed);
+    col += a.brainCol * nebula * 0.008 * a.ambient * a.ambActive * silence;
 
-    // ── Compute 48 spatial emitters on golden-ratio sphere ──
-    SpEmitter emit[SP_NUM_OBJ];
-    float stretchX = 1.0 + a.stereoWid * 0.4;
+    // ── Raycast to base plane (y=0) ──
+    float tPlane = -camPos.y / rd.y;
+    float3 planeHit = camPos + rd * tPlane;
+    float2 xz = planeHit.xz;
+    float distFromCenter = length(xz);
 
-    [unroll] for (int n = 0; n < SP_NUM_OBJ; n++) {
-        int band = n / 6;  // 8 bands × 6 nodes per band
-        int sub = n % 6;
-        float bt = float(band) / float(SP_N_BANDS - 1);
+    // Depth fade — grid fades into distance
+    float depthFade = smoothstep(8.0, 1.0, tPlane) * smoothstep(0.0, 0.5, tPlane);
+    // Radial fade — grid fades at edges
+    float radialFade = smoothstep(FABRIC_RADIUS, 0.0, distFromCenter) * silence;
 
-        float rawEnergy = bands[band];
-        float energy = (band < 4) ? pow(rawEnergy, 0.5) : rawEnergy;
-        float gate = smoothstep(0.02, 0.08, rawEnergy);
+    if (tPlane > 0.0 && radialFade > 0.01)
+    {
+        // ── Grid cell lookup ──
+        float2 gridCoord = xz / GRID_SPACING;
+        float2 cellBase = floor(gridCoord);
+        float2 cellFrac = frac(gridCoord);
 
-        // Spectrum L/R
-        float freqU = spBandFreq[band];
-        float lE = u_spectrum.SampleLevel(u_sampler, float2(freqU, 0.166), 0).r;
-        float rE = u_spectrum.SampleLevel(u_sampler, float2(freqU, 0.833), 0).r;
-        float stereoEnergy = max(lE, rE);
-        energy = max(energy, stereoEnergy * 0.5);
-        gate = max(gate, smoothstep(0.02, 0.08, stereoEnergy));
-        float panMod = (lE - rE) * 0.5;
+        // ── Evaluate 4 corner heights ──
+        float2 c0xz = (cellBase + float2(0, 0)) * GRID_SPACING;
+        float2 c1xz = (cellBase + float2(1, 0)) * GRID_SPACING;
+        float2 c2xz = (cellBase + float2(0, 1)) * GRID_SPACING;
+        float2 c3xz = (cellBase + float2(1, 1)) * GRID_SPACING;
 
-        // Golden ratio 3D distribution
-        float t = float(n) / float(SP_NUM_OBJ);
-        float phi = acos(1.0 - 2.0 * t);
-        float theta = float(n) * PHI * PI * 2.0 + a.stereoBal * 0.4 + panMod * 0.3;
-        float radius = 2.0 + sin(float(n) * 1.7) * 0.5;
+        float h0 = fabricHeight(c0xz, sources, Time, beatPulse, a.beatPhase,
+                                kickSurge, a.transient, dspTHD, a.envelope,
+                                dspLUFS, dspPhaseCoh, silence);
+        float h1 = fabricHeight(c1xz, sources, Time, beatPulse, a.beatPhase,
+                                kickSurge, a.transient, dspTHD, a.envelope,
+                                dspLUFS, dspPhaseCoh, silence);
+        float h2 = fabricHeight(c2xz, sources, Time, beatPulse, a.beatPhase,
+                                kickSurge, a.transient, dspTHD, a.envelope,
+                                dspLUFS, dspPhaseCoh, silence);
+        float h3 = fabricHeight(c3xz, sources, Time, beatPulse, a.beatPhase,
+                                kickSurge, a.transient, dspTHD, a.envelope,
+                                dspLUFS, dspPhaseCoh, silence);
 
-        emit[n].worldPos = float3(
-            radius * sin(phi) * cos(theta) * stretchX,
-            radius * cos(phi),
-            radius * sin(phi) * sin(theta)
-        );
+        // ── Bilinear interpolate surface height ──
+        float surfH = lerp(lerp(h0, h1, cellFrac.x), lerp(h2, h3, cellFrac.x), cellFrac.y);
 
-        // Energy with beat/transient/envelope
-        float h = energy * (0.3 + beatPulse * 0.7 * (0.5 + bt * 0.5));
-        h += transientAmt * lerp(0.05, 0.2, bt) * gate;
-        h += envelope * lerp(0.08, 0.03, bt) * gate;
-        h += a.section * 0.05 * gate;
-        h += (band < 2) ? kickSurge * kickSurge * lerp(0.4, 0.1, bt) : 0.0;
-        h *= gate;
+        // ── Project 4 corners to screen space ──
+        float3 c0world = float3(c0xz.x, h0, c0xz.y);
+        float3 c1world = float3(c1xz.x, h1, c1xz.y);
+        float3 c2world = float3(c2xz.x, h2, c2xz.y);
+        float3 c3world = float3(c3xz.x, h3, c3xz.y);
 
-        emit[n].intensity = clamp(h, 0.0, 1.5);
-        emit[n].active = gate;
-        emit[n].bandIdx = band;
-        emit[n].side = sub % 2;
-        emit[n].subIdx = sub / 2;
-        emit[n].wavePhase = Time * (1.5 + bt * 6.0) + float(n) * 0.3;
+        float2 c0screen = projectWorld(c0world, camPos, fwd, right, up, FOV);
+        float2 c1screen = projectWorld(c1world, camPos, fwd, right, up, FOV);
+        float2 c2screen = projectWorld(c2world, camPos, fwd, right, up, FOV);
+        float2 c3screen = projectWorld(c3world, camPos, fwd, right, up, FOV);
 
-        float3 c = hsv(a.hueBase + bt * a.hueRange, 0.6 * a.satur, 0.9);
-        c = lerp(c, lerp(a.brainCol, a.brainCol2, bt), 0.3);
-        emit[n].color = c;
+        // ── Grid line rendering — distance to each edge segment ──
+        float2 tmpClosest;
+        float dEdge01 = distToSeg2D(p, c0screen, c1screen, tmpClosest);
+        float dEdge02 = distToSeg2D(p, c0screen, c2screen, tmpClosest);
+        float dEdge13 = distToSeg2D(p, c1screen, c3screen, tmpClosest);
+        float dEdge23 = distToSeg2D(p, c2screen, c3screen, tmpClosest);
+        float minEdge = min(min(dEdge01, dEdge02), min(dEdge13, dEdge23));
 
-        emit[n].depth = spDepth(emit[n].worldPos, cam);
-        emit[n].screenPos = spProject(emit[n].worldPos, cam);
-        float sz = 0.02 + emit[n].intensity * 0.06;
-        if (n < 24) sz *= 1.5;
-        emit[n].screenSize = sz / max(emit[n].depth * 0.15, 0.3) * 3.0;
-    }
+        // ── Grid node glow — distance to each corner in screen space ──
+        float dNode0 = length(p - c0screen);
+        float dNode1 = length(p - c1screen);
+        float dNode2 = length(p - c2screen);
+        float dNode3 = length(p - c3screen);
+        float minNode = min(min(dNode0, dNode1), min(dNode2, dNode3));
 
-    // ── Filaments — connect nearby emitters (culled) ──
-    [loop] for (int f = 0; f < SP_NUM_OBJ; f++) {
-        if (emit[f].active < 0.01 || emit[f].depth < 0.1) continue;
-        [loop] for (int g = f + 1; g < SP_NUM_OBJ; g++) {
-            if (emit[g].active < 0.01 || emit[g].depth < 0.1) continue;
-
-            float3 a_pos = emit[f].worldPos;
-            float3 b_pos = emit[g].worldPos;
-            float filLen = length(a_pos - b_pos);
-            if (filLen > 2.5) continue;
-
-            float filIntensity = emit[f].intensity * emit[g].intensity / (filLen * 0.5 + 0.1);
-            filIntensity *= lerp(0.5, 1.3, phaseCoh);
-            filIntensity *= (1.0 + lufs * 0.15);
-            filIntensity *= (0.8 + a.stereoWid * 0.3);
-
-            // Culled line distance
-            float2 ab = emit[g].screenPos - emit[f].screenPos;
-            float t2 = saturate(dot(p - emit[f].screenPos, ab) / max(dot(ab, ab), 0.0001));
-            float2 closest = emit[f].screenPos + ab * t2;
-            float2 lineDiff = p - closest;
-            float lineDist2 = dot(lineDiff, lineDiff);
-            if (lineDist2 > 0.02) continue;
-
-            float lineDist = sqrt(lineDist2);
-            float filWidth = 0.003 + filIntensity * 0.01;
-            float coreGlow = exp(-lineDist * lineDist / (filWidth * filWidth * 0.15));
-            float haloGlow = exp(-lineDist * lineDist / (filWidth * filWidth * 6.0));
-
-            float3 filCol = lerp(emit[f].color, emit[g].color, 0.5);
-            float avgDepth = (emit[f].depth + emit[g].depth) * 0.5;
-            float depthFade = exp(-avgDepth * 0.1);
-
-            col += filCol * coreGlow * filIntensity * depthFade * 0.8 * silence;
-            col += filCol * haloGlow * filIntensity * depthFade * 0.15 * silence;
-            col += filCol * beatPulse * exp(-lineDist * lineDist / (filWidth * filWidth)) * exp(-a.beatPhase * 4.0) * 0.15 * silence;
+        // ── Find nearest wave source for frequency-positioned color ──
+        float nearestSrcDist = 999.0;
+        float nearestFreqFrac = 0.5;
+        float nearestPan = 0.0;
+        [unroll] for (int ns = 0; ns < N_SOURCES; ns++)
+        {
+            if (sources[ns].amplitude < 0.01) continue;
+            float sd2 = dot(xz - sources[ns].pos, xz - sources[ns].pos);
+            if (sd2 < nearestSrcDist) { nearestSrcDist = sd2; nearestFreqFrac = sources[ns].freqFrac; nearestPan = sources[ns].pan; }
         }
+
+        // ── Color computation ──
+        float3 freqCol = hsv(a.hueBase + nearestFreqFrac * a.hueRange, 0.6 * a.satur, 0.9);
+        float3 brain = lerp(a.brainCol, a.brainCol2, nearestFreqFrac);
+        brain = lerp(brain, freqCol, 0.3);
+
+        // Speech mode shifts vocal bands toward brainCol3
+        float vocalW = smoothstep(2.5, 3.5, nearestFreqFrac * 7.0) * (1.0 - smoothstep(5.0, 6.0, nearestFreqFrac * 7.0));
+        brain = lerp(brain, a.brainCol3, a.speechMode * vocalW * 0.5);
+
+        // Height-based wave glow — crests glow bright, troughs stay dark
+        float heightFrac = clamp(surfH * 2.0 + 0.3, 0.0, 1.0);
+        float3 waveGlow = lerp(float3(0.15, 0.08, 0.03), float3(0.5, 0.8, 1.0), heightFrac);
+        waveGlow = lerp(waveGlow, float3(0.9, 0.95, 1.0), pow(heightFrac, 3.0));
+
+        // Phase coherence → field symmetry
+        float coherence = lerp(0.3, 1.0, dspPhaseCoh);
+        float3 gridCol = lerp(brain, waveGlow, 0.4);
+        gridCol = lerp(gridCol, gridCol.gbr, (1.0 - coherence) * 0.05);
+
+        // Stereo L/R tint
+        float sideTint = clamp(xz.x * 0.2 + nearestPan * 0.3, -1.0, 1.0);
+        gridCol = lerp(gridCol, gridCol * float3(1.2, 0.9, 0.78), max(sideTint, 0.0) * a.stereoWid * 0.15);
+        gridCol = lerp(gridCol, gridCol * float3(0.78, 0.9, 1.2), max(-sideTint, 0.0) * a.stereoWid * 0.15);
+
+        // ── Grid lines — glowing wireframe ──
+        float lineWidth = 0.002 / (1.0 + tPlane * 0.05);
+        float lineIntensity = exp(-minEdge * minEdge / (lineWidth * lineWidth * 2.0));
+        lineIntensity *= depthFade * radialFade;
+
+        float3 lineCol = gridCol * (0.3 + heightFrac * 0.7);
+        col += lineCol * lineIntensity * (0.4 + a.brightness * 0.3 + a.envelope * 0.3) * silence;
+
+        // ── Grid nodes — glowing dots at intersections ──
+        float nodeSize = 0.006 / (1.0 + tPlane * 0.08);
+        float nodeIntensity = exp(-minNode * minNode / (nodeSize * nodeSize * 2.0));
+        nodeIntensity *= depthFade * radialFade;
+
+        float crestGlow = smoothstep(0.02, 0.15, surfH);
+        float3 nodeCol = lerp(gridCol * 0.5, waveGlow, crestGlow);
+        col += nodeCol * nodeIntensity * (0.5 + a.envelope * 0.5 + crestGlow * 0.5) * silence;
+
+        // ── Wave crest glow — plasma field where surface is high ──
+        float crestIntensity = crestGlow * depthFade * radialFade;
+        col += waveGlow * crestIntensity * (0.15 + a.envelope * 0.3) * silence;
+
+        // ── Beat — gravitational wave pulse through grid ──
+        col += waveGlow * beatPulse * crestGlow * 0.06 * depthFade * radialFade * silence;
+
+        // ── Kick — spacetime tear glow ──
+        col += float3(1.0, 0.3, 0.05) * kickSurge * crestGlow * 0.3 * depthFade * radialFade * silence;
+
+        // ── Transient — quantum fluctuation flash ──
+        if (a.transient > 0.02)
+            col += float3(0.8, 0.9, 1.0) * a.transient * crestGlow * 0.1 * depthFade * radialFade * silence;
+
+        // ── ColorPulse ──
+        col += a.brainCol3 * a.colorPulse * crestGlow * 0.02 * depthFade * radialFade * silence;
+
+        // ── Dynamic + punch ──
+        col += waveGlow * a.punch * crestGlow * 0.04 * depthFade * radialFade * silence;
     }
 
-    // ── Nodes — fused glow via spEmitGlow with distance culling ──
-    [loop] for (int m = 0; m < SP_NUM_OBJ; m++) {
-        if (emit[m].active < 0.01 || emit[m].depth < 0.1) continue;
-        float depthFade = exp(-emit[m].depth * 0.1);
-        col += spEmitGlow(p, emit[m], lufs, crest, beatPulse, a.beatPhase,
-                          kickSurge, transientAmt, silence) * depthFade;
-
-        // Supernova event at selected node
-        int supernovaNode = int(a.beatPhase * float(SP_NUM_OBJ)) % SP_NUM_OBJ;
-        if (m == supernovaNode && kickSurge > 0.1) {
-            float scrDist = length(p - emit[m].screenPos);
-            float sz = emit[m].screenSize;
-            float shellR = a.beatPhase * 0.4;
-            float shell = exp(-abs(scrDist - shellR) * 12.0) * kickSurge * 0.5;
-            col += emit[m].color * shell * silence;
-            col += float3(1.0, 0.9, 0.7) * exp(-scrDist * scrDist / (sz * sz * 0.08)) * kickSurge * 3.0 * silence;
-        }
-    }
-
-    // ── Mode-specific overlays ──
-    float perturb = transientAmt * fbm2_4(p * 10.0 + Time * 5.0) * 0.04;
-    col += a.brainCol3 * perturb * silence;
-
-    float shimmer = (bands[6] + bands[7]) * hash21(p * 100.0 + Time * 20.0) * 0.015;
-    col += float3(0.7, 0.8, 1.0) * shimmer * silence;
-
+    // ── Beat ring — gravitational wave expanding outward ──
     float ringDist = abs(r - a.beatPhase * 0.7);
-    col += a.brainCol * exp(-ringDist * ringDist * 40.0) * beatPulse * 0.025 * silence;
-    col += a.brainCol2 * kickSurge * 0.05 * exp(-r * r * 5.0) * silence;
-    col += float3(1.0, 0.8, 0.5) * transientAmt * 0.025 * silence;
-    col += a.brainCol3 * a.colorPulse * 0.02 * silence;
-    col += a.brainCol2 * a.energy * 0.015 * silence;
-    col += a.brainCol * a.punch * 0.015 * silence;
-    col += a.brainCol * a.beatAnt * 0.01 * exp(-r * 2.0) * silence;
+    col += a.brainCol * exp(-ringDist * ringDist * 40.0) * beatPulse * 0.02 * silence;
 
-    col *= (0.3 + a.gated * 0.7);
-    col += standardOverlays(p, r, a) * 0.02;
+    // ── Kick flash — spacetime tear ──
+    col += float3(1.0, 0.4, 0.1) * kickSurge * 0.04 * exp(-r * r * 5.0) * silence;
 
+    // ── Transient pop ──
+    col += float3(0.8, 0.9, 1.0) * a.transient * 0.015 * silence;
+
+    // ── ColorPulse ──
+    col += a.brainCol3 * a.colorPulse * 0.015 * silence;
+
+    // ── Energy + punch ──
+    col += a.brainCol2 * a.energy * 0.01 * silence;
+    col += a.brainCol * a.punch * 0.01 * silence;
+
+    // ── Standard overlays ──
+    col += standardOverlays(p, r, a) * 0.02 * silence;
+
+    // ── HDR brightness limiter ──
     float maxC = max(col.r, max(col.g, col.b));
-    if (maxC > 1.14) col *= 1.14 / maxC;
+    if (maxC > 1.2) col *= 1.2 / maxC;
 
-    col *= silence;
     return float4(col, 1.0);
 }

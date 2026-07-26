@@ -17,7 +17,7 @@
 
 #define PI 3.14159265
 #define N_COMP 8
-#define GRID_RES 10
+#define GRID_RES 6
 #define MARCH_STEPS 32
 
 static const float bandFreq[8] = {
@@ -94,7 +94,7 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target
 
     // ── Camera — orbit around hologram table ──
     float FOV = 0.6;
-    float camAng = a.section * 0.8 + a.stereoBal * 0.2 + panMod * 0.3 + Time * 0.03 * a.motSpeed;
+    float camAng = a.section * 0.8 + a.stereoBal * 0.2 + panMod * 0.3;
     float3 camPos = float3(sin(camAng) * 3.0, 2.0, cos(camAng) * 3.0);
     float3 camTarget = float3(0, 0.5, 0);
     float3 fwd = normalize(camTarget - camPos);

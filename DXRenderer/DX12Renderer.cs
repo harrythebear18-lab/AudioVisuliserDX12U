@@ -108,41 +108,41 @@ public class DX12Renderer : IRenderer
     {
         { "quantum_bars", "Quantum Bars" },
         { "plasma_field", "Plasma Field" },
-        { "neon_pulse", "Neon Pulse" },
-        { "particle_flow", "Particle Flow" },
+        { "neon_pulse", "Spectrum Tectonics" },
+        { "particle_flow", "Spectrum Vortex" },
         { "waveform", "Audio Lichtenberg" },
         { "sphere", "Chladni Plate" },
         { "aurora", "Aurora Borealis" },
-        { "dna_helix", "DNA Helix" },
-        { "heartbeat", "Spectrum Singularity" },
+        { "dna_helix", "Spectrum Helix" },
+        { "heartbeat", "Acoustic Wavefront Propagator" },
         { "rtx_mesh", "RTX Mesh" },
         { "ray_marched", "Spectrum Kaleidoscope" },
         { "volumetric_clouds", "Volumetric Clouds" },
-        { "fractal_dimensions", "Fractal Dimensions" },
+        { "fractal_dimensions", "Spectrum Mandelbox" },
         { "neural_network", "Acoustic Holography" },
-        { "quantum_field", "Quantum Field" },
+        { "quantum_field", "Spectrum Lattice" },
         { "holographic", "Holographic" },
-        { "particle_storm", "Particle Storm" },
-        { "crystal", "Spectrum Black Hole" },
+        { "particle_storm", "Spectrum Storm" },
+        { "crystal", "Ferrofluid Wavefield" },
         { "terrain", "Spectrum Terrain" },
         { "galaxy", "Spacetime Gravity Waves" },
-        { "wave_tessellation", "Wave Pool + Tessellation" },
+        { "wave_tessellation", "Dual Tessellation" },
         { "audio_tessellation", "Audio Tessellation" },
-        { "compute_shaders", "Acoustic Ferrofluid" },
+        { "compute_shaders", "Ferrofluid Pool" },
         { "rtx_reflections", "Acoustic Droplets & Mirror Pool" },
         { "spectrum_3d", "3D Spectrum Bars" },
-        { "spatial_dolby", "Spatial Dolby" },
+        { "spatial_dolby", "3D Spatial Soundscape" },
         { "water_droplets", "Seismic Tectonic Plate" },
-        { "matrix_rain", "Mandelbulb Fractal" },
+        { "matrix_rain", "Audio-Reactive Mandelbulb" },
         { "waveform_tunnel", "Audio Waveform Tunnel" },
-        { "crystal_lattice", "Synthwave Grid" },
+        { "crystal_lattice", "Synthwave Horizon" },
         { "space_plasma", "Space Plasma Field" },
         { "gravitational_waves", "Gravitational Space Waves" },
         { "fluid_dynamics", "Fluid Dynamics" },
         { "lightning_storm", "Lightning Storm" },
         { "neon_cityscape", "Neon Cityscape" },
-        { "spectrum_waterfall", "Spectrum Waterfall" },
-        { "cosmic_web", "Cosmic Web" },
+        { "spectrum_waterfall", "Spatial Audio Sonar" },
+        { "cosmic_web", "Gravitational Wavefield" },
         { "laser_show", "Resonance Field" },
         { "neural_synapse", "Neural Synapse Storm" },
         { "hologram_projector", "Acoustic Hologram Projector" },
@@ -953,41 +953,41 @@ public class DX12Renderer : IRenderer
         string[] modes = {
             "quantum_bars",       // 0. Quantum Bars — 3D spectrum with quantum clouds
             "plasma_field",       // 1. Plasma Field — domain-warped FBM fluid
-            "neon_pulse",         // 2. Neon Pulse — concentric rings + waveform
-            "particle_flow",      // 3. Particle Flow — curl-noise vector field
-            "waveform",           // 4. Waveform — multi-layer 3D waveform ribbons
-            "sphere",             // 5. Sphere — raymarched displaced sphere + aura
+            "neon_pulse",         // 2. Spectrum Tectonics — audio-sculpted canyon flyover
+            "particle_flow",      // 3. Spectrum Vortex — frequency-assigned particles in vortex
+            "waveform",           // 4. Audio Lichtenberg — branching electrical discharge tree
+            "sphere",             // 5. Chladni Plate — standing-wave interference resonance
             "aurora",             // 6. Aurora Borealis — curtains + starfield
-            "dna_helix",          // 7. DNA Helix — double helix + energy flow
-            "heartbeat",          // 8. Heartbeat — heart SDF + ECG + pulse rings
+            "dna_helix",          // 7. Spectrum Helix — 3D horizontal particle flow
+            "heartbeat",          // 8. Acoustic Wavefront Propagator — expanding spherical wavefronts
             "rtx_mesh",           // 9. RTX Mesh — deformable grid + reflective floor
             "ray_marched",        // 10. Spectrum Kaleidoscope — kaleidoscopic fractal
             "volumetric_clouds",  // 11. Volumetric Clouds — 3D noise + lightning
-            "fractal_dimensions", // 12. Fractal Dimensions — mandelbulb + orbit trap
-            "neural_network",     // 13. Neural Network — firing neurons + signals
-            "quantum_field",      // 14. Quantum Field — probability waves + entanglement
+            "fractal_dimensions", // 12. Spectrum Mandelbox — 3D box-fold fractal
+            "neural_network",     // 13. Acoustic Holography — volumetric wave interference field
+            "quantum_field",      // 14. Spectrum Lattice — frequency-driven quantum particle lattice
             "holographic",        // 15. Holographic — wireframe + scan lines + glitch
-            "particle_storm",     // 16. Particle Storm — vortex + lightning
-            "crystal",            // 17. Spectrum Black Hole — gravitational lensing + accretion disk
+            "particle_storm",     // 16. Spectrum Storm — frequency-driven storm particles
+            "crystal",            // 17. Ferrofluid Wavefield — SDF spike field with wave interference
             "terrain",            // 18. Spectrum Terrain — ridged noise mountains flyover
             "galaxy",             // 19. Spacetime Gravity Waves — gravitational wave fabric
-            "wave_tessellation",  // 20. Wave Pool + Tessellation
+            "wave_tessellation",  // 20. Dual Tessellation — dual inverted mesh
             "audio_tessellation", // 21. Audio Tessellation — Voronoi terrain with audio
-            "compute_shaders",    // 22. Compute Shaders — 3D raymarched vortex
+            "compute_shaders",    // 22. Ferrofluid Pool — SDF heightfield with metallic shading
             "rtx_reflections",    // 23. Acoustic Droplets & Mirror Pool — falling objects + reflective liquid
             "spectrum_3d",        // 24. 3D Spectrum Bars
-            "spatial_dolby",      // 25. Spatial Dolby — 3D spatial audio field
+            "spatial_dolby",      // 25. 3D Spatial Soundscape — spatial audio field with band×channel separation
             "water_droplets",    // 26. Seismic Tectonic Plate — seismic wave grid mesh
-            "matrix_rain",       // 27. Mandelbulb Fractal — audio-reactive 3D raymarched fractal
+            "matrix_rain",       // 27. Audio-Reactive Mandelbulb — 3D spherical fractal
             "waveform_tunnel",   // 28. Audio Waveform Tunnel — fly through waveform
-            "crystal_lattice",   // 29. Synthwave Grid — Tron-style perspective grid
+            "crystal_lattice",   // 29. Synthwave Horizon — 3D raymarched neon landscape
             "space_plasma",      // 30. Space Plasma Field — volumetric plasma with EM field math
             "gravitational_waves",// 31. Gravitational Space Waves — GW strain tensor fabric
             "fluid_dynamics",    // 32. Fluid Dynamics — Navier-Stokes volumetric fluid
             "lightning_storm",   // 33. Lightning Storm — dielectric breakdown arcs
             "neon_cityscape",    // 34. Neon Cityscape — synthwave skyline + reflections
-            "spectrum_waterfall",// 35. Spectrum Waterfall — 3D scrolling spectrogram
-            "cosmic_web",        // 36. Cosmic Web — dark matter filament network
+            "spectrum_waterfall",// 35. Spatial Audio Sonar — 360° immersive 3D sonar display
+            "cosmic_web",        // 36. Gravitational Wavefield — spacetime fabric with gravitational wells
             "laser_show",        // 37. Resonance Field — 3D Chladni standing wave patterns at spatial audio positions
             "neural_synapse",    // 38. Neural Synapse Storm — 3D neural network with synapse firing
             "hologram_projector",// 39. Acoustic Hologram Projector — volumetric hologram table
@@ -1685,6 +1685,14 @@ public class DX12Renderer : IRenderer
     public void SetMode(string name)
     {
         int idx = _modeNames.IndexOf(name);
+        if (idx < 0)
+        {
+            // Try reverse lookup from display name
+            foreach (var kv in _displayNames)
+            {
+                if (kv.Value == name) { idx = _modeNames.IndexOf(kv.Key); break; }
+            }
+        }
         if (idx >= 0)
         {
             _currentMode = idx;

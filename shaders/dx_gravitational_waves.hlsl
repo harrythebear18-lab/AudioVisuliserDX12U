@@ -153,7 +153,7 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target
 
     // ── Camera — section-driven orbit ──
     float FOV = 0.55;
-    float camAng = a.section * 0.8 + a.stereoBal * 0.2 + Time * 0.03 * a.motSpeed;
+    float camAng = a.section * 0.8 + a.stereoBal * 0.2;
     float3 camPos = float3(sin(camAng) * 4.0, 2.5 + a.stereoDiff * 0.15, cos(camAng) * 4.0);
     float3 camTarget = float3(0, 0, 0);
     float3 rd = cameraRay(camPos, camTarget, float2(-p.x, -p.y), FOV);
