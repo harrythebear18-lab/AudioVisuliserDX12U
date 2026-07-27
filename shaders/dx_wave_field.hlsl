@@ -49,19 +49,14 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target
         cam = seCamera(camPos, float3(0, -0.3, -2.0), 0.75);
     }
 
-    // ── Spatial encoder: WAVE_FIELD profile — audio-reactive movement ──
+    // ── Spatial encoder: WAVE_FIELD profile — gentle audio-reactive movement ──
     SeParams params = seParams(SE_PROFILE_WAVE_FIELD);
-    // Energy drives depth range — louder music pushes nodes further forward
-    params.depthScale = 3.0 + a.energy * 4.0 + kickSurge * 2.0;
-    // Phase coherence tightens width (coherent = narrow, decorrelated = wide)
-    params.widthScale = 1.2 + (1.0 - phaseCoh) * 1.5 + a.stereoDiff * 0.5;
-    // Transient expands height (sharp transients scatter nodes vertically)
-    params.heightScale = 3.0 + transientAmt * 3.0 + crest * 2.0;
-    // Envelope modulates motion speed (busy music = faster movement)
-    params.motionSpeed = 0.5 + envelope * 1.5 + a.motSpeed * 0.5;
-    // THD jitter
+    // Use envelope (slowest-changing) for param scaling to avoid coordinate jumps
+    params.depthScale = 4.0 + envelope * 1.5;
+    params.widthScale = 1.5 + (1.0 - phaseCoh) * 0.5;
+    params.heightScale = 4.0 + envelope * 1.0;
+    params.motionSpeed = 0.5 + a.motSpeed * 0.5;
     params.jitterAmt = 0.1 + thd * 0.15;
-    // Stereo width influence
     params.stereoWid = a.stereoWid;
     params.stereoBal = a.stereoBal;
 

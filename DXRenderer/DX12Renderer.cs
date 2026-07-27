@@ -2156,6 +2156,7 @@ public class DX12Renderer : IRenderer
             _hud.TotalModes = _modeNames.Count;
             _hud.VSyncEnabled = VSyncEnabled;
             _hud.FPS = _smoothedFPS;
+            _hud.VRMode = _vrActive;
             _hud.Render(_commandList, _lastFrame, dt);
         }
 

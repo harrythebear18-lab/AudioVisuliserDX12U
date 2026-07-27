@@ -34,7 +34,7 @@ public class VisualSmoother
         if (target >= current)
         {
             // Smooth attack — ease into new value instead of snapping
-            float at = 1f - MathF.Cos(release * MathF.PI * 0.5f * 0.6f);
+            float at = 1f - MathF.Cos(release * MathF.PI * 0.5f * 0.3f);
             return current + (target - current) * at;
         }
         float t = 1f - MathF.Cos(release * MathF.PI * 0.5f);
