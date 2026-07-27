@@ -1,11 +1,11 @@
 # RTX Audio Visualizer DX12U
 
-A high-fidelity, real-time GPU audio visualizer for Windows, built on **DirectX 12 Ultimate** with HLSL shader-based rendering. It captures system audio via WASAPI, performs FFT analysis through a C# audio pipeline, and drives 48 distinct visualization modes rendered entirely on the GPU. Modes 29–48 use a shared **spatial encoder** backend with psychoacoustic spatial mapping and **OpenXR VR support**.
+A high-fidelity, real-time GPU audio visualizer for Windows, built on **DirectX 12 Ultimate** with HLSL shader-based rendering. It captures system audio via WASAPI, performs FFT analysis through a C# audio pipeline, and drives 50 distinct visualization modes rendered entirely on the GPU. Modes 29–49 use a shared **spatial encoder** backend with psychoacoustic spatial mapping and **OpenXR VR support**.
 
 ## Features
 
-- **48 visualization modes** — from spectrum bars to raymarched fractals, psychoacoustic spatial visualizations, and VR-native audio field rendering
-- **Psychoacoustic spatial modes** — modes 29–48 visualize auditory phenomena: interaural level/time differences, room impulse response, spectral masking, critical bands, standing waves, and more
+- **50 visualization modes** — from spectrum bars to raymarched fractals, psychoacoustic spatial visualizations, and VR-native audio field rendering
+- **Psychoacoustic spatial modes** — modes 29–49 visualize auditory phenomena: interaural level/time differences, room impulse response, spectral masking, critical bands, standing waves, and more
 - **OpenXR VR support** — stereo rendering with head tracking, IPD offset, VR comfort guidelines (brightness caps, stable horizon, 16-source culling)
 - **Spatial encoder backend** — shared `spatial_encoder.hlsl` maps audio data to 3D positions using psychoacoustic profiles (spherical, radial, tunnel, hemisphere, wave field, psychoacoustic)
 - **Real-time audio analysis** — WASAPI loopback capture, 8-band spectrum analyzer, tempo/beat detection, kick/transient detection, LUFS, crest factor, THD, phase coherence
@@ -24,7 +24,7 @@ AudioPipeline (C# DLL)
     RDMA Triple Buffer (zero-copy GPU upload)
          ↓
     DX12Renderer (C#)
-    └── HLSL Pixel Shaders (48 modes, runtime-compiled via DXC)
+    └── HLSL Pixel Shaders (50 modes, runtime-compiled via DXC)
          └── Audio constant buffers + spectrum textures → shader uniforms
 ```
 
@@ -35,7 +35,7 @@ AudioPipeline (C# DLL)
 | `AudioPipeline/` | C# DLL — WASAPI audio capture, FFT, band analysis, tempo/kick detection |
 | `DXRenderer/` | C# DX12 renderer — swap chain, shader compilation, constant buffers, mode management |
 | `RDMAReader/` | RDMA signal backbone — triple-buffered zero-copy data transfer |
-| `shaders/` | 48 HLSL pixel shaders + shared includes (audio, noise, SDF, raymarch, postfx, spatial encoder) |
+| `shaders/` | 50 HLSL pixel shaders + shared includes (audio, noise, SDF, raymarch, postfx, spatial encoder) |
 | `shaders/include/` | Shared shader libraries — `audio_cb.hlsl`, `noise.hlsl`, `sdf.hlsl`, `raymarch.hlsl`, `postfx.hlsl`, `audio_reactive.hlsl`, `layers.hlsl`, `color_utils.hlsl`, `dsp_cb.hlsl`, `spatial_encoder.hlsl` |
 | `DXRenderer/OpenXRManager.cs` | OpenXR VR integration — stereo rendering, head pose, IPD, comfort settings |
 | `audio/` | Python audio engine bridge (legacy/alternative path) |
@@ -96,6 +96,8 @@ AudioPipeline (C# DLL)
 | 45 | `sonic_topology` | Sonic Topology Mapper | Manifold deformation with wireframe mesh |
 | 46 | `particle_hologram` | Acoustic Particle Hologram | Particle clusters that converge on beats and explode on kicks |
 | 47 | `freq_nebula` | Sonic Sphereworld | Planet terrain displacement with volumetric atmosphere |
+| 48 | `wave_field` | Spatiotemporal Wave Field | 3D wave equation with audio sources |
+| 49 | `fractal_explorer` | Fractal Dimension Explorer | Morphing 3D Mandelbulb with audio-driven parameters |
 
 ## Audio Data Available to Shaders
 
