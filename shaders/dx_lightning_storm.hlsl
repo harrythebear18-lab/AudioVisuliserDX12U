@@ -109,7 +109,14 @@ float3 temporalMasking(float2 p, SeEmitter e, float kickSurge, float beatPulse,
 float3 criticalBandEdges(float2 p, AudioData a, float thd, float silence)
 {
     // Angular position in screen space maps to frequency band
-    float angle = atan2(p.y, p.x);
+    // Use atan2 approximation: atan2(y,x) = atan(y/x) adjusted by quadrant
+    float angle;
+    if (abs(p.x) > 0.001) {
+        angle = atan(p.y / p.x);
+        if (p.x < 0.0) angle += (p.y >= 0.0) ? PI : -PI;
+    } else {
+        angle = (p.y >= 0.0) ? (PI * 0.5) : -(PI * 0.5);
+    }
     float bandFrac = (angle + PI) / (2.0 * PI);
     float bandPos = bandFrac * 8.0;
 
@@ -130,7 +137,8 @@ float3 criticalBandEdges(float2 p, AudioData a, float thd, float silence)
     float3 col = bandCol * edge * 0.012 * radialFade * silence;
 
     // Active bands glow brighter
-    float bandEnergy = bands8(bandIdx, a);
+    float bandArr[8] = { a.b0, a.b1, a.b2, a.b3, a.b4, a.b5, a.b6, a.b7 };
+    float bandEnergy = bandArr[bandIdx];
     col += bandCol * bandEnergy * 0.008 * radialFade * (1.0 - abs(frac(bandPos) - 0.5) * 2.0) * silence;
 
     return col;

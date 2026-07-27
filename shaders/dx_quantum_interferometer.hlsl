@@ -212,9 +212,8 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target
     // ── Standard overlays ──
     col += standardOverlays(p, r, a) * 0.02;
 
-    // ── HDR limiter ──
-    float maxC = max(col.r, max(col.g, col.b));
-    if (maxC > 1.2) col *= 1.2 / maxC;
+    // ── Soft tone mapping (Reinhard) — no hard clamp, preserves color ──
+    col = softReinhard(col);
 
     col *= silence;
 

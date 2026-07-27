@@ -234,9 +234,10 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target
 
     col += standardOverlays(p, r, a) * 0.015 * silence;
 
-    // ── HDR brightness limiter — VR comfort ──
-    float maxC = max(col.r, max(col.g, col.b));
-    if (maxC > 1.0) col *= 1.0 / maxC;
+    // ── Active-emitter normalization — busy music doesn't stack brighter ──
+    col *= sqrt(16.0 / seActiveCount(emit));
+    // ── Soft tone mapping (Reinhard) — no hard clamp, preserves color ──
+    col = softReinhard(col);
 
     return float4(col, 1.0);
 }
