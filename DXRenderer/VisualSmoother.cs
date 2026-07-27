@@ -18,6 +18,7 @@ public class VisualSmoother
     private float _smBrightness, _smBloom, _smBeam, _smDynLight, _smAmbient;
     private float _smEffect, _smMovement;
     private float _smStereoBal, _smStereoWid;
+    private float _smLeftEn, _smRightEn;
     private float _smHue;
     private float _smPhaseCorr, _smBeatAnt, _smClarity;
 
@@ -26,12 +27,16 @@ public class VisualSmoother
     private bool _firstPerf = true;
 
     /// <summary>
-    /// Sine-curved decay: instant attack, smooth release.
+    /// Sine-curved smoothing: smooth attack + smooth release.
     /// </summary>
     public static float SineDecay(float current, float target, float release)
     {
         if (target >= current)
-            return target;
+        {
+            // Smooth attack — ease into new value instead of snapping
+            float at = 1f - MathF.Cos(release * MathF.PI * 0.5f * 0.6f);
+            return current + (target - current) * at;
+        }
         float t = 1f - MathF.Cos(release * MathF.PI * 0.5f);
         return current + (target - current) * t;
     }
@@ -76,6 +81,7 @@ public class VisualSmoother
             _smAmbient = f.AmbientLightIntensity; _smEffect = f.EffectIntensity;
             _smMovement = f.MovementIntensity; _smStereoBal = f.StereoBalance;
             _smStereoWid = f.StereoWidth; _smHue = f.BaseHue;
+            _smLeftEn = f.LeftEnergy; _smRightEn = f.RightEnergy;
             _smPhaseCorr = f.PhaseCorrelation; _smBeatAnt = f.BeatAnticipation;
             _smClarity = f.SpectralClarity;
             _firstFrame = false;
@@ -95,6 +101,9 @@ public class VisualSmoother
             _smB5 = SineDecay(_smB5, f.Band5, med);
             _smB6 = SineDecay(_smB6, f.Band6, med);
             _smB7 = SineDecay(_smB7, f.Band7, med);
+            // Smooth L/R energy with symmetric lerp — drives emitter X/depth positions
+            _smLeftEn = _smLeftEn + (f.LeftEnergy - _smLeftEn) * 0.15f;
+            _smRightEn = _smRightEn + (f.RightEnergy - _smRightEn) * 0.15f;
             _smBrightness = SineDecay(_smBrightness, f.Brightness, slow);
             _smBloom = SineDecay(_smBloom, f.BloomIntensity, slow);
             _smBeam = SineDecay(_smBeam, f.BeamIntensity, slow);
@@ -127,7 +136,7 @@ public class VisualSmoother
             Bril = _smB6,
             Air = _smB7,
             // SpatialTelemetry
-            StereoLR = new Vector2(f.LeftEnergy, f.RightEnergy),
+            StereoLR = new Vector2(_smLeftEn, _smRightEn),
             Balance = _smStereoBal,
             Width = _smStereoWid,
             Phase = _smPhaseCorr,

@@ -173,11 +173,20 @@ float3 seEncodePosition(int bandIdx, int subIdx, int side,
     float transientScatter = transientAmt * 0.3 * params.jitterAmt;
     float sharpness = 1.0 / (1.0 + crest * 0.3);
 
-    // THD jitter — wrap time to prevent float32 precision loss after hours
+    // THD jitter — smooth temporal interpolation instead of discrete snapping
     float wrappedTime = Time % 3600.0;
-    float jt = floor(wrappedTime * 4.0 * params.motionSpeed);
-    float jitterX = (hash11(float(bandIdx) * 17.3 + jt) - 0.5) * thd * 0.04 * params.jitterAmt;
-    float jitterY = (hash11(float(bandIdx) * 19.7 + jt) - 0.5) * thd * 0.03 * params.jitterAmt;
+    float jtRaw = wrappedTime * 4.0 * params.motionSpeed;
+    float jt0 = floor(jtRaw);
+    float jt1 = jt0 + 1.0;
+    float jtFrac = jtRaw - jt0;
+    // Smoothstep for ease-in-out instead of linear lerp
+    float jtSmooth = jtFrac * jtFrac * (3.0 - 2.0 * jtFrac);
+    float hashX0 = hash11(float(bandIdx) * 17.3 + jt0);
+    float hashX1 = hash11(float(bandIdx) * 17.3 + jt1);
+    float hashY0 = hash11(float(bandIdx) * 19.7 + jt0);
+    float hashY1 = hash11(float(bandIdx) * 19.7 + jt1);
+    float jitterX = (lerp(hashX0, hashX1, jtSmooth) - 0.5) * thd * 0.04 * params.jitterAmt;
+    float jitterY = (lerp(hashY0, hashY1, jtSmooth) - 0.5) * thd * 0.03 * params.jitterAmt;
 
     // Stereo width stretches X
     float widthMod = params.widthScale * (1.0 + params.stereoWid * 0.5);
