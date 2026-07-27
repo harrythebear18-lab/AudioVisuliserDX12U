@@ -1,82 +1,68 @@
-// Mode 35: Neon Cityscape — synthwave skyline with SDF buildings
-// 24 buildings (3 per band) with neon window glow, wet street reflections.
+// RS by Resonance — RapidSpectrum Visualizer
+// HUD Mode 35: Neon Cityscape — synthwave skyline with SDF buildings
+// VR Layer mode. Uses spatial_encoder.hlsl with SE_PROFILE_TUNNEL.
+//
+// 48 emitters (8 bands × 3 sub × L/R) placed in corridor depth.
+// Emitters become neon buildings along both sides of a flythrough corridor.
 // Bass = building height/mass, mids = window illumination/neon flicker,
 // highs = particle shimmer/edge highlights. Beat = sun pulse. Kick = ground flash.
-// Transient = neon glitch. DSP: LUFS→emission, crest→neon edge, THD→flicker, phase→coherence.
+// Transient = neon glitch.
+//
+// World: grid floor as road, fog density 0.08 (thick), dark ambient.
+// Camera: flythrough corridor, FOV 0.6 (VR: head pose from OpenXR).
+// Visual: SDF raymarched buildings + ground plane, neon window glow, wet reflections.
+//
+// DSP: LUFS→emission, crest→neon edge, THD→flicker, phase→coherence.
+// HDR output to Layer 0. No local postfx. Pipeline owns bloom/tonemap.
 
-#include "include/audio_cb.hlsl"
-#include "include/dsp_cb.hlsl"
-#include "include/color_utils.hlsl"
-#include "include/noise.hlsl"
+#include "include/spatial_encoder.hlsl"
 #include "include/sdf.hlsl"
-#include "include/raymarch.hlsl"
-#include "include/audio_reactive.hlsl"
 #include "include/layers.hlsl"
 
 #define PI 3.14159265
-#define N_COMP 8
-#define N_BUILDINGS 24
-#define MAX_STEPS 48
+#define MAX_STEPS 40
 
+// ── Building data derived from emitters ──
 struct Building {
     float3 pos;
     float3 dims;
     float energy;
     float gate;
-    float freqFrac;
     float3 color;
 };
 
-void computeBuildings(out Building bld[N_BUILDINGS], float bands[8], float dspBands[8],
-                      float kickSurge, float beatPulse, float stereoBal, float crest, float thd,
-                      float transient, float envelope, float section, AudioData a)
+void computeBuildingsFromEmitters(out Building bld[SE_NUM_OBJ], SeEmitter emit[SE_NUM_OBJ], AudioData a)
 {
-    [unroll] for (int n = 0; n < N_BUILDINGS; n++)
-    {
-        int band = n / 3;
-        int sub = n % 3;
-        float bt = float(band) / float(N_COMP - 1);
+    [loop] for (int n = 0; n < SE_NUM_OBJ; n++) {
+        bld[n].gate = emit[n].active * step(0.05, emit[n].intensity);
+        if (bld[n].gate < 0.01) {
+            bld[n].pos = float3(100, 100, 100);
+            bld[n].dims = float3(0.01, 0.01, 0.01);
+            bld[n].energy = 0.0;
+            bld[n].color = float3(0, 0, 0);
+            continue;
+        }
 
-        float rawEnergy = bands[band] + dspBands[band] * 0.12;
-        float energy = (band < 4) ? pow(rawEnergy, 0.5) : rawEnergy;
-        float gate = smoothstep(0.02, 0.08, rawEnergy);
-
-        // Building position — lined up along z-axis on both sides
-        float side = (n % 2 == 0) ? 1.0 : -1.0;
-        float zPos = (float(n) - float(N_BUILDINGS) * 0.5) * 1.5;
-        float xPos = side * (1.5 + a.stereoWid * 0.3);
+        // Use emitter world position — TUNNEL profile puts L on left wall, R on right
+        float3 ep = emit[n].worldPos;
+        float bandFrac = float(emit[n].bandIdx) / 7.0;
 
         // Height — bass drives taller buildings
-        float height = 1.0 + energy * 2.5 * gate;
-        float width = 0.8 + bands[1] * 0.2;
-        float depth = 0.8 + bands[0] * 0.2;
+        float height = 1.0 + emit[n].intensity * 2.5;
+        float width = 0.6 + a.b1 * 0.2;
+        float depth = 0.6 + a.b0 * 0.2;
 
-        bld[n].pos = float3(xPos, height * 0.5 - 1.0, zPos);
+        bld[n].pos = float3(ep.x, height * 0.5 - 1.0, ep.z);
         bld[n].dims = float3(width * 0.5, height * 0.5, depth * 0.5);
-
-        // Staggered beat breathing
-        float h = energy * (0.3 + beatPulse * 0.7 * (0.5 + bt * 0.5));
-        h += transient * lerp(0.05, 0.2, bt) * gate;
-        h += envelope * lerp(0.08, 0.03, bt) * gate;
-        h += section * 0.05 * gate;
-        h += (band < 2) ? kickSurge * kickSurge * lerp(0.4, 0.1, bt) : 0.0;
-        h *= gate;
-
-        bld[n].energy = clamp(h, 0.0, 1.5);
-        bld[n].gate = gate;
-        bld[n].freqFrac = bt;
-
-        // Color — frequency-positioned neon
-        float3 c = hsv(a.hueBase + bt * a.hueRange, 0.6 * a.satur, 0.9);
-        c = lerp(c, lerp(a.brainCol, a.brainCol2, bt), 0.3);
-        bld[n].color = c;
+        bld[n].energy = emit[n].intensity;
+        bld[n].color = emit[n].color;
     }
 }
 
-float sceneSDF(float3 p, Building bld[N_BUILDINGS])
+float sceneSDF(float3 p, Building bld[SE_NUM_OBJ])
 {
     float minDist = 1e10;
-    [unroll] for (int i = 0; i < N_BUILDINGS; i++) {
+    [loop] for (int i = 0; i < SE_NUM_OBJ; i++) {
         if (bld[i].gate < 0.01) continue;
         float3 local = p - bld[i].pos;
         float d = sdBox(local, bld[i].dims);
@@ -88,10 +74,10 @@ float sceneSDF(float3 p, Building bld[N_BUILDINGS])
     return minDist;
 }
 
-float3 windowGlow(float3 p, Building bld[N_BUILDINGS], float bands[8], float thd, AudioData a)
+float3 windowGlow(float3 p, Building bld[SE_NUM_OBJ], float thd, AudioData a)
 {
     float3 winCol = float3(0, 0, 0);
-    [unroll] for (int j = 0; j < N_BUILDINGS; j++) {
+    [loop] for (int j = 0; j < SE_NUM_OBJ; j++) {
         if (bld[j].gate < 0.01) continue;
 
         float2 winUV = float2(p.x, p.y + 1.0) * 5.0;
@@ -106,7 +92,7 @@ float3 windowGlow(float3 p, Building bld[N_BUILDINGS], float bands[8], float thd
         float winShape = smoothstep(0.15, 0.25, winFrac.x) * smoothstep(0.15, 0.25, winFrac.y) *
                          smoothstep(0.85, 0.75, winFrac.x) * smoothstep(0.85, 0.75, winFrac.y);
 
-        winCol += bld[j].color * winOn * winShape * flicker * bld[j].energy * 0.3;
+        winCol += bld[j].color * winOn * winShape * flicker * bld[j].energy * 0.15;
     }
     return winCol;
 }
@@ -118,47 +104,72 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target
     float r = length(p);
     float silence = 1.0 - a.isSilent;
 
+    // ── DSP additive ──
     float lufs = lufsNormalized();
     float crest = crestFactorNormalized();
     float thd = thdNormalized();
     float phaseCoh = phaseCoherence();
+    float phaseCorr = phaseCoherence();
 
-    float bands[8] = { a.b0, a.b1, a.b2, a.b3, a.b4, a.b5, a.b6, a.b7 };
-    float dspBands[8] = { DspBand0, DspBand1, DspBand2, DspBand3, DspBand4, DspBand5, DspBand6, DspBand7 };
+    // ── Audio dynamics ──
     float beatPulse = a.beat * a.tempoConf;
     float kickSurge = a.kick * a.kickConf * exp(-a.beatPhase * 3.0);
     float transientAmt = a.transient;
     float envelope = a.envelope;
-    float phrase = phrasePulse(a);
 
-    Building bld[N_BUILDINGS];
-    computeBuildings(bld, bands, dspBands, kickSurge, beatPulse, a.stereoBal, crest, thd,
-                     transientAmt, envelope, a.section, a);
+    // ── Camera — VR head pose or desktop flythrough ──
+    SeCamera cam;
+    if (VR_ACTIVE) {
+        cam = seCameraVR();
+    } else {
+        float FOV = 0.6;
+        float camAng = a.section * 0.8 + a.stereoBal * 0.2 + Time * 0.03 * a.motSpeed;
+        float3 camPos = float3(sin(camAng) * 0.5, -0.3 + a.stereoDiff * 0.15, -4.0);
+        cam = seCamera(camPos, float3(a.stereoBal * 0.2, 0.5, 0), FOV);
+    }
 
-    // ── Camera — section-driven orbit ──
-    float FOV = 0.7;
-    float camAng = a.section * 0.8 + a.stereoBal * 0.2 + Time * 0.03 * a.motSpeed;
-    float3 camPos = float3(sin(camAng) * 0.5, -0.3 + a.stereoDiff * 0.15, -4.0);
-    float3 camTarget = float3(a.stereoBal * 0.2, 0.5, 0);
-    float3 rd = cameraRay(camPos, camTarget, float2(-p.x, -p.y), FOV);
+    // ── Spatial encoder: TUNNEL profile ──
+    SeParams params = seParams(SE_PROFILE_TUNNEL);
+    params.widthScale = 2.0;
+    params.heightScale = 2.0;
+    params.depthScale = 8.0;
+    params.jitterAmt = 0.15 + thd * 0.2;
 
-    // ── Background — synthwave sky ──
-    float3 col = float3(0.02, 0.005, 0.04) * silence;
+    float bands[8] = { a.b0, a.b1, a.b2, a.b3, a.b4, a.b5, a.b6, a.b7 };
+
+    SeEmitter emit[SE_NUM_OBJ];
+    seComputeEmitters(emit, bands, a, cam, params,
+                      lufs, crest, thd, phaseCoh,
+                      beatPulse, kickSurge, transientAmt, envelope);
+
+    // ── World environment ──
+    SeWorld world = seWorld(0.08, float3(0.02, 0.005, 0.04), -1.0, 0.0, 0.0);
+    world.gridIntensity = 0.04;
+    world.ambientLevel = 0.005;
+    world.ambientColor = float3(0.04, 0.01, 0.06);
+    seApplyWorldFog(emit, world);
+
+    // ── Derive buildings from emitters ──
+    Building bld[SE_NUM_OBJ];
+    computeBuildingsFromEmitters(bld, emit, a);
+
+    // ── Background — synthwave sky + world env ──
+    float3 col = seWorldEnvironment(p, cam, world, a, kickSurge, silence);
 
     // Setting sun — beat-pulsing
     float2 sunPos = float2(0, 0.3);
     float sunDist = length(p - sunPos);
     float sunPulse = 0.5 + beatPulse * 0.5;
-    float3 sunCol = hsv(0.08, 0.6 * a.satur, 0.9) * exp(-sunDist * 3.0) * sunPulse * 0.5;
-    col += sunCol * silence;
+    col += hsv(0.08, 0.6 * a.satur, 0.9) * exp(-sunDist * 3.0) * sunPulse * 0.15 * silence;
 
     // Sun bands
-    float sunBands = step(0.5, frac((p.y - 0.3) * 20.0)) * exp(-sunDist * 2.0) * 0.3;
+    float sunBands = step(0.5, frac((p.y - 0.3) * 20.0)) * exp(-sunDist * 2.0) * 0.15;
     col += float3(1.0, 0.4, 0.1) * sunBands * sunPulse * silence;
 
     col += starfield(uv, a) * 0.02;
 
     // ── SDF raymarch — buildings and ground ──
+    float3 rd = normalize(cam.fwd + p.x * cam.right * cam.fov + p.y * cam.up * cam.fov);
     float t = 0.05;
     float marchGlow = 0.0;
     float steps = 0.0;
@@ -166,7 +177,7 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target
     float3 hitPos = float3(0, 0, 0);
 
     [loop] for (int i = 0; i < MAX_STEPS; i++) {
-        float3 sp = camPos + rd * t;
+        float3 sp = cam.pos + rd * t;
         float d = sceneSDF(sp, bld);
         marchGlow += 0.01 / (1.0 + d * d * 50.0);
         steps += 1.0;
@@ -189,86 +200,94 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target
         if (isGround) {
             // Wet street reflection
             float3 reflDir = reflect(rd, n);
-            float2 reflUV = uv + reflDir.xy * 0.3;
             float3 reflCol = float3(0.02, 0.005, 0.04);
             reflCol += hsv(0.08, 0.6 * a.satur, 0.9) * exp(-length(p - float2(0, 0.3)) * 3.0) * sunPulse * 0.3;
-
-            float reflStrength = 0.3 + bands[0] * 0.4 + bands[1] * 0.3;
+            float reflStrength = 0.3 + a.b0 * 0.4 + a.b1 * 0.3;
             col = lerp(col, reflCol, reflStrength * 0.5) * ao;
 
             // Street neon lines
             float2 streetUV = float2(p.x / (1.0 - p.y * 0.5), p.y);
             float streetLine = smoothstep(0.48, 0.5, abs(frac(streetUV.x * 3.0) - 0.5));
-            col += a.brainCol * streetLine * 0.3 * silence;
-
-            // Kick reflection flash
-            col += a.brainCol3 * kickSurge * 0.2 * silence;
+            col += a.brainCol * streetLine * 0.1 * silence;
+            col += a.brainCol3 * kickSurge * 0.08 * silence;
         } else {
-            // Building surface
             float3 baseCol = float3(0.03, 0.02, 0.05);
-
-            // Fresnel edge glow
             float fres = pow(1.0 - max(dot(n, -rd), 0.0), 3.0);
             float3 edgeCol = lerp(a.brainCol, a.brainCol2, a.section * 0.1);
-            baseCol += edgeCol * fres * (0.4 + bands[4] * 0.3) * (1.0 + crest * 0.2);
+            baseCol += edgeCol * fres * (0.4 + a.b4 * 0.3) * (1.0 + crest * 0.2);
 
-            // Window glow
-            float3 winCol = windowGlow(hitPos, bld, bands, thd, a);
-
+            float3 winCol = windowGlow(hitPos, bld, thd, a);
             float3 litCol = (baseCol + winCol) * ao * (1.0 + lufs * 0.15);
 
-            // Neon sign flicker — transient-driven
             float neonFlicker = transientAmt * hash21(hitPos.xz * 10.0 + Time * 20.0) * 0.1;
             litCol += a.brainCol3 * neonFlicker * silence;
+
+            // Depth fog on buildings
+            float depthFog = exp(-t * world.fogDensity);
+            litCol *= depthFog;
 
             col = blendScreen(col, litCol);
         }
     }
 
     // March glow — atmospheric haze
-    col += a.brainCol * marchGlow * 0.05 * silence;
+    col += a.brainCol * marchGlow * 0.04 * silence;
+
+    // ── Emitter glow — depth-aware, VR or desktop ──
+    if (VR_ACTIVE) {
+        float3 headPos = float3(VRHeadPos.xyz);
+        [loop] for (int j = 0; j < SE_NUM_OBJ; j++) {
+            if (emit[j].active < 0.01 || emit[j].depth < 0.1) continue;
+            col += seEmitGlowVR(p, emit[j], world, headPos, silence);
+        }
+    } else {
+        [loop] for (int j = 0; j < SE_NUM_OBJ; j++) {
+            if (emit[j].active < 0.01 || emit[j].depth < 0.1) continue;
+            col += seEmitGlowDepth(p, emit[j], world, lufs, crest, beatPulse,
+                                   a.beatPhase, kickSurge, transientAmt, silence);
+        }
+    }
+
+    // ── L↔R links ──
+    [loop] for (int lb = 0; lb < SE_N_BANDS; lb++) {
+        col += seLinkLR(p, emit, lb, phaseCorr, phaseCoh, silence);
+    }
+
+    // ── Listener focal point ──
+    col += seListener(p, cam, a, beatPulse, kickSurge, silence);
 
     // ── Flying particles — high-band driven ──
-    [unroll] for (int k = 0; k < 12; k++) {
-        float kf = float(k) / 12.0;
+    [unroll] for (int k = 0; k < 8; k++) {
+        float kf = float(k) / 8.0;
         float2 partPos = float2(
             sin(kf * PI * 2.0 + Time * 0.5 * a.motSpeed) * 2.0,
             cos(kf * PI * 3.0 + Time * 0.3 * a.motSpeed) * 1.5
         );
         float partDist = length(p - partPos);
-        float partGlow = exp(-partDist * partDist * 50.0) * (bands[6] + bands[7]) * 0.1;
+        float partGlow = exp(-partDist * partDist * 50.0) * (a.b6 + a.b7) * 0.03;
         col += a.brainCol2 * partGlow * silence;
     }
 
-    // ── Beat ring ──
+    // ── Mode-specific overlays — subtle ──
     float ringDist = abs(r - a.beatPhase * 0.7);
-    col += a.brainCol * exp(-ringDist * ringDist * 40.0) * beatPulse * 0.025 * silence;
-
-    // ── Kick flash ──
-    col += a.brainCol2 * kickSurge * 0.05 * exp(-r * r * 5.0) * silence;
-
-    // ── Transient pop ──
-    col += float3(1.0, 0.8, 0.5) * transientAmt * 0.025 * silence;
-
-    // ── ColorPulse ──
-    col += a.brainCol3 * a.colorPulse * 0.02 * silence;
-
-    // ── Energy + punch ──
-    col += a.brainCol2 * a.energy * 0.015 * silence;
-    col += a.brainCol * a.punch * 0.015 * silence;
-
-    // ── Beat anticipation ──
-    col += a.brainCol * a.beatAnt * 0.01 * exp(-r * 2.0) * silence;
+    col += a.brainCol * exp(-ringDist * ringDist * 40.0) * beatPulse * 0.02 * silence;
+    col += a.brainCol2 * kickSurge * 0.04 * exp(-r * r * 5.0) * silence;
+    col += float3(1.0, 0.8, 0.5) * transientAmt * 0.02 * silence;
+    col += a.brainCol3 * a.colorPulse * 0.015 * silence;
+    col += a.brainCol2 * a.energy * 0.01 * silence;
+    col += a.brainCol * a.punch * 0.01 * silence;
+    col += a.brainCol * a.beatAnt * 0.008 * exp(-r * 2.0) * silence;
 
     // ── Dynamic range ──
     col *= (0.3 + a.gated * 0.7);
 
-    // ── Standard overlays — surface mode gets more weight ──
+    // ── Standard overlays ──
     col += standardOverlays(p, r, a) * 0.02;
 
-    // ── HDR limiter ──
-    float maxC = max(col.r, max(col.g, col.b));
-    if (maxC > 1.2) col *= 1.2 / maxC;
+        // ── Active-emitter normalization — busy music doesn't stack brighter ──
+    col *= sqrt(16.0 / seActiveCount(emit));
+    // ── Soft tone mapping (Reinhard) — no hard clamp, preserves color ──
+    col = softReinhard(col);
 
     col *= silence;
 

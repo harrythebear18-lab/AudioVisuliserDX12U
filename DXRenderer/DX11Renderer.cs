@@ -996,6 +996,19 @@ VSOutput main(VSInput input) {
         _context.Unmap(_meshCB, 0);
     }
 
+    public void UpdateVRHeadPose(System.Numerics.Vector3 headPos, System.Numerics.Quaternion headQuat,
+                                  float ipd, int eyeIndex, float fov)
+    {
+        // VR not supported on DX11 backend — no-op
+    }
+
+    public void DisableVR()
+    {
+        // VR not supported on DX11 backend — no-op
+    }
+
+    public bool VRActive => false;
+
     public void Render(float time)
     {
         _renderStartTicks = _renderTimer.ElapsedTicks;

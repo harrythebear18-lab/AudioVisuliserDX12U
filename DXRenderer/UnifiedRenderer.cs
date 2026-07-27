@@ -127,6 +127,21 @@ public class UnifiedRenderer : IRenderer, IDisposable
         }
     }
 
+    public void UpdateVRHeadPose(System.Numerics.Vector3 headPos, System.Numerics.Quaternion headQuat,
+                                  float ipd, int eyeIndex, float fov)
+    {
+        if (_dx12 != null)
+            _dx12.UpdateVRHeadPose(headPos, headQuat, ipd, eyeIndex, fov);
+    }
+
+    public void DisableVR()
+    {
+        if (_dx12 != null)
+            _dx12.DisableVR();
+    }
+
+    public bool VRActive => _dx12?.VRActive ?? false;
+
     public void Render(float time)
     {
         _renderStartTicks = _renderTimer.ElapsedTicks;

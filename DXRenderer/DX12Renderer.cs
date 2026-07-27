@@ -32,6 +32,15 @@ public class DX12Renderer : IRenderer
     private readonly AutoResetEvent _fenceEvent = new(false);
     private ulong _fenceValue;
 
+    /// <summary>Native D3D12 device pointer for OpenXR binding (XR_KHR_D3D12_enable).</summary>
+    public IntPtr NativeDevice => _device?.NativePointer ?? IntPtr.Zero;
+
+    /// <summary>Native D3D12 command queue pointer for OpenXR binding (XR_KHR_D3D12_enable).</summary>
+    public IntPtr NativeCommandQueue => _commandQueue?.NativePointer ?? IntPtr.Zero;
+
+    /// <summary>The D3D12 device object (for OpenXR resource creation).</summary>
+    public ID3D12Device10 D3D12Device => _device;
+
     private const int FrameCount = 2;
     private int _frameIndex;
     private ID3D12CommandAllocator[] _commandAllocators = new ID3D12CommandAllocator[FrameCount];
@@ -97,6 +106,19 @@ public class DX12Renderer : IRenderer
     private IntPtr _dspCBPtr;
     private const int DSP_CB_SIZE = 64; // 16 floats = 64 bytes
 
+    // VR head pose constant buffer (b3) — OpenXR head pose for VR modes
+    private ID3D12Resource _vrCB = null!;
+    private IntPtr _vrCBPtr;
+    private const int VR_CB_SIZE = 48; // 3 float4s = 48 bytes
+    private bool _vrActive = false;
+
+    // VR head pose data — set by OpenXR manager when headset is connected
+    private System.Numerics.Vector3 _vrHeadPos;
+    private System.Numerics.Quaternion _vrHeadQuat = System.Numerics.Quaternion.Identity;
+    private float _vrIPD = 0.063f; // default 63mm
+    private int _vrEyeIndex = 0;
+    private float _vrFOV = 0.75f;
+
     private ID3D12DescriptorHeap _cbvSrvUavHeap = null!;
     private ID3D12DescriptorHeap _samplerHeap = null!;
     private uint _srvDescriptorSize;
@@ -136,10 +158,10 @@ public class DX12Renderer : IRenderer
         { "matrix_rain", "Audio-Reactive Mandelbulb" },
         { "waveform_tunnel", "Audio Waveform Tunnel" },
         { "crystal_lattice", "Synthwave Horizon" },
-        { "space_plasma", "Space Plasma Field" },
-        { "gravitational_waves", "Gravitational Space Waves" },
+        { "space_plasma", "Auditory Soundfield" },
+        { "gravitational_waves", "Acoustic Room Response" },
         { "fluid_dynamics", "Fluid Dynamics" },
-        { "lightning_storm", "Lightning Storm" },
+        { "lightning_storm", "Spectral Masking Cascade" },
         { "neon_cityscape", "Neon Cityscape" },
         { "spectrum_waterfall", "Spatial Audio Sonar" },
         { "cosmic_web", "Gravitational Wavefield" },
@@ -464,6 +486,17 @@ public class DX12Renderer : IRenderer
             ResourceStates.GenericRead);
         unsafe { _dspCBPtr = new IntPtr(_dspCB.Map<byte>(0)); }
 
+        // VR constant buffer (b3) — head pose for OpenXR VR modes
+        uint vrCBSize = (uint)((VR_CB_SIZE + 255) & ~255);
+        _vrCB = _device.CreateCommittedResource(
+            HeapType.Upload,
+            ResourceDescription.Buffer(vrCBSize),
+            ResourceStates.GenericRead);
+        unsafe { _vrCBPtr = new IntPtr(_vrCB.Map<byte>(0)); }
+        // Initialize VR CB to inactive (w=0) so shaders fall back to computed camera
+        var vrInit = new float[] { 0, 0, 0, 0, 0, 0, 0, 1, 0.063f, 0, 0.75f, 0.1f };
+        Marshal.Copy(vrInit, 0, _vrCBPtr, 12);
+
         // Spectrum texture on default heap + upload buffer for CPU→GPU copy
         // 3 rows: row 0 = left, row 1 = center, row 2 = right
         _spectrumTexture = _device.CreateCommittedResource(
@@ -691,9 +724,11 @@ public class DX12Renderer : IRenderer
             new(RootParameterType.ConstantBufferView, new RootDescriptor1(1, 0), ShaderVisibility.All),
             // [2] CBV b2 — DspCB (Resonance DSP: LUFS, THD, phase, crest factor, biquad bands)
             new(RootParameterType.ConstantBufferView, new RootDescriptor1(2, 0), ShaderVisibility.All),
-            // [3] Descriptor Table — 8 SRVs (t0-t7): spectrum, layer0, layer1, bloom0, bloom1, feedback0, skiaTex, noise
+            // [3] CBV b3 — VRCB (OpenXR head pose: position, quaternion, eye info)
+            new(RootParameterType.ConstantBufferView, new RootDescriptor1(3, 0), ShaderVisibility.All),
+            // [4] Descriptor Table — 8 SRVs (t0-t7): spectrum, layer0, layer1, bloom0, bloom1, feedback0, skiaTex, noise
             new(new RootDescriptorTable1 { Ranges = new[] { new DescriptorRange1(DescriptorRangeType.ShaderResourceView, 8, 0) } }, ShaderVisibility.Pixel),
-            // [4] Descriptor Table — 4 UAVs (u0-u3): compute output, particle buffer, history buffer, debug
+            // [5] Descriptor Table — 4 UAVs (u0-u3): compute output, particle buffer, history buffer, debug
             new(new RootDescriptorTable1 { Ranges = new[] { new DescriptorRange1(DescriptorRangeType.UnorderedAccessView, 4, 0) } }, ShaderVisibility.Pixel),
         };
 
@@ -981,10 +1016,10 @@ public class DX12Renderer : IRenderer
             "matrix_rain",       // 27. Audio-Reactive Mandelbulb — 3D spherical fractal
             "waveform_tunnel",   // 28. Audio Waveform Tunnel — fly through waveform
             "crystal_lattice",   // 29. Synthwave Horizon — 3D raymarched neon landscape
-            "space_plasma",      // 30. Space Plasma Field — volumetric plasma with EM field math
-            "gravitational_waves",// 31. Gravitational Space Waves — GW strain tensor fabric
+            "space_plasma",      // 30. Auditory Soundfield — ILD/ITD stereo localization visualization
+            "gravitational_waves",// 31. Acoustic Room Response — impulse response of virtual space
             "fluid_dynamics",    // 32. Fluid Dynamics — Navier-Stokes volumetric fluid
-            "lightning_storm",   // 33. Lightning Storm — dielectric breakdown arcs
+            "lightning_storm",   // 33. Spectral Masking Cascade — auditory masking visualization
             "neon_cityscape",    // 34. Neon Cityscape — synthwave skyline + reflections
             "spectrum_waterfall",// 35. Spatial Audio Sonar — 360° immersive 3D sonar display
             "cosmic_web",        // 36. Gravitational Wavefield — spacetime fabric with gravitational wells
@@ -1810,7 +1845,42 @@ public class DX12Renderer : IRenderer
         dspData[14] = frame.DspBand6;
         dspData[15] = frame.DspBand7;
         Marshal.Copy(dspData.ToArray(), 0, _dspCBPtr, 16);
+
+        // Upload VR constant buffer (b3) — head pose data
+        var vrData = new float[12];
+        vrData[0] = _vrHeadPos.X; vrData[1] = _vrHeadPos.Y; vrData[2] = _vrHeadPos.Z;
+        vrData[3] = _vrActive ? 1.0f : 0.0f;  // w = vrActive flag
+        vrData[4] = _vrHeadQuat.X; vrData[5] = _vrHeadQuat.Y; vrData[6] = _vrHeadQuat.Z; vrData[7] = _vrHeadQuat.W;
+        vrData[8] = _vrIPD; vrData[9] = _vrEyeIndex; vrData[10] = _vrFOV; vrData[11] = 0.1f;
+        Marshal.Copy(vrData, 0, _vrCBPtr, 12);
     }
+
+    /// <summary>
+    /// Update VR head pose from OpenXR. Call per-eye before Render().
+    /// </summary>
+    public void UpdateVRHeadPose(System.Numerics.Vector3 headPos, System.Numerics.Quaternion headQuat,
+                                  float ipd, int eyeIndex, float fov)
+    {
+        _vrHeadPos = headPos;
+        _vrHeadQuat = headQuat;
+        _vrIPD = ipd;
+        _vrEyeIndex = eyeIndex;
+        _vrFOV = fov;
+        _vrActive = true;
+    }
+
+    /// <summary>
+    /// Disable VR mode — shaders fall back to computed camera.
+    /// </summary>
+    public void DisableVR()
+    {
+        _vrActive = false;
+    }
+
+    /// <summary>
+    /// Whether VR mode is currently active.
+    /// </summary>
+    public bool VRActive => _vrActive;
 
     public void Render(float time)
     {
@@ -1861,6 +1931,7 @@ public class DX12Renderer : IRenderer
         _commandList.SetGraphicsRootConstantBufferView(0, _audioCB.GPUVirtualAddress);
         _commandList.SetGraphicsRootConstantBufferView(1, _timeCB.GPUVirtualAddress);
         _commandList.SetGraphicsRootConstantBufferView(2, _dspCB.GPUVirtualAddress);
+        _commandList.SetGraphicsRootConstantBufferView(3, _vrCB.GPUVirtualAddress);
 
         _commandList.IASetVertexBuffers(0, new VertexBufferView
         {
@@ -1876,13 +1947,13 @@ public class DX12Renderer : IRenderer
         });
         _commandList.IASetPrimitiveTopology(Vortice.Direct3D.PrimitiveTopology.TriangleStrip);
 
-        // SRV descriptor table (root param 3): [0]=spectrum, [1]=layer0, [2]=layer1, [3]=bloom0, [4]=bloom1, [5-7]=null
+        // SRV descriptor table (root param 4): [0]=spectrum, [1]=layer0, [2]=layer1, [3]=bloom0, [4]=bloom1, [5-7]=null
         var srvGpuHandle = _cbvSrvUavHeap.GetGPUDescriptorHandleForHeapStart();
-        _commandList.SetGraphicsRootDescriptorTable(3, srvGpuHandle);
+        _commandList.SetGraphicsRootDescriptorTable(4, srvGpuHandle);
 
-        // UAV descriptor table (root param 4): [8-11]=u0-u3 (null for now, future compute use)
+        // UAV descriptor table (root param 5): [8-11]=u0-u3 (null for now, future compute use)
         var uavGpuHandle = _cbvSrvUavHeap.GetGPUDescriptorHandleForHeapStart() + (int)(_srvDescriptorSize * 8);
-        _commandList.SetGraphicsRootDescriptorTable(4, uavGpuHandle);
+        _commandList.SetGraphicsRootDescriptorTable(5, uavGpuHandle);
 
         if (_verbose && _frameCount % 60 == 0)
             DebugLogger.Info($"[DX12Debug] Root signature set, current mode: {CurrentMode}");
@@ -1932,7 +2003,7 @@ public class DX12Renderer : IRenderer
             // Extract: layerTex0 → bloomTexture (downsampled)
             // Bind layerTex0 at t0 (descriptor offset 2)
             var extractSrvHandle = srvGpuHandle + (int)(_srvDescriptorSize * 2);
-            _commandList.SetGraphicsRootDescriptorTable(3, extractSrvHandle);
+            _commandList.SetGraphicsRootDescriptorTable(4, extractSrvHandle);
             
             _commandList.ResourceBarrierTransition(_bloomTexture, ResourceStates.CopyDest, ResourceStates.RenderTarget);
             var bloomRtv0 = _bloomRtvHeap.GetCPUDescriptorHandleForHeapStart();
@@ -1943,7 +2014,7 @@ public class DX12Renderer : IRenderer
             // Blur H: bloomTexture → bloomTexture2
             // Bind bloomTexture at t0 (descriptor offset 4)
             var blurHSrvHandle = srvGpuHandle + (int)(_srvDescriptorSize * 4);
-            _commandList.SetGraphicsRootDescriptorTable(3, blurHSrvHandle);
+            _commandList.SetGraphicsRootDescriptorTable(4, blurHSrvHandle);
             
             _commandList.ResourceBarrierTransition(_bloomTexture, ResourceStates.RenderTarget, ResourceStates.PixelShaderResource);
             _commandList.ResourceBarrierTransition(_bloomTexture2, ResourceStates.CopyDest, ResourceStates.RenderTarget);
@@ -1956,7 +2027,7 @@ public class DX12Renderer : IRenderer
             // Blur V: bloomTexture2 → bloomTexture
             // Bind bloomTexture2 at t0 (descriptor offset 5)
             var blurVSrvHandle = srvGpuHandle + (int)(_srvDescriptorSize * 5);
-            _commandList.SetGraphicsRootDescriptorTable(3, blurVSrvHandle);
+            _commandList.SetGraphicsRootDescriptorTable(4, blurVSrvHandle);
             
             _commandList.ResourceBarrierTransition(_bloomTexture2, ResourceStates.RenderTarget, ResourceStates.PixelShaderResource);
             _commandList.ResourceBarrierTransition(_bloomTexture, ResourceStates.PixelShaderResource, ResourceStates.RenderTarget);
@@ -1988,7 +2059,7 @@ public class DX12Renderer : IRenderer
         _commandList.OMSetRenderTargets(postfxRtv, null);
 
         // Bind SRV table at offset 0: t0=spectrum, t1=layer0, t2=layer1, t3=bloom0
-        _commandList.SetGraphicsRootDescriptorTable(3, srvGpuHandle);
+        _commandList.SetGraphicsRootDescriptorTable(4, srvGpuHandle);
 
         if (_postfxPSO != null)
         {
@@ -2018,7 +2089,7 @@ public class DX12Renderer : IRenderer
         _commandList.OMSetRenderTargets(backBufferRtv, null);
 
         // Bind the complete SRV table so PostFxTex at register t6 resolves to postfxTex.
-        _commandList.SetGraphicsRootDescriptorTable(3, srvGpuHandle);
+        _commandList.SetGraphicsRootDescriptorTable(4, srvGpuHandle);
 
         if (_tonemapPSO != null)
         {
@@ -2028,7 +2099,7 @@ public class DX12Renderer : IRenderer
         else if (_compositePSO != null)
         {
             // Fallback: old composite reads t1=layer0 directly
-            _commandList.SetGraphicsRootDescriptorTable(3, srvGpuHandle);
+            _commandList.SetGraphicsRootDescriptorTable(4, srvGpuHandle);
             _commandList.SetPipelineState(_compositePSO);
             _commandList.DrawInstanced(4, 1, 0, 0);
         }
@@ -2068,7 +2139,7 @@ public class DX12Renderer : IRenderer
 
             // Draw overlay with alpha blending (backbuffer is already RenderTarget)
             var skiaSrvHandle = srvGpuHandle + (int)(_srvDescriptorSize * 7);
-            _commandList.SetGraphicsRootDescriptorTable(3, skiaSrvHandle);
+            _commandList.SetGraphicsRootDescriptorTable(4, skiaSrvHandle);
             _commandList.SetPipelineState(_skiaPSO);
             _commandList.DrawInstanced(4, 1, 0, 0);
         }
@@ -2155,12 +2226,13 @@ public class DX12Renderer : IRenderer
         _commandList.SetGraphicsRootConstantBufferView(0, _audioCB.GPUVirtualAddress);
         _commandList.SetGraphicsRootConstantBufferView(1, _timeCB.GPUVirtualAddress);
         _commandList.SetGraphicsRootConstantBufferView(2, _dspCB.GPUVirtualAddress);
+        _commandList.SetGraphicsRootConstantBufferView(3, _vrCB.GPUVirtualAddress);
         _commandList.IASetVertexBuffers(0, new VertexBufferView { BufferLocation = _vertexBuffer.GPUVirtualAddress, SizeInBytes = 4 * 5 * sizeof(float), StrideInBytes = 5 * sizeof(float) });
         _commandList.IASetIndexBuffer(new IndexBufferView { BufferLocation = _indexBuffer.GPUVirtualAddress, SizeInBytes = 6 * sizeof(uint), Format = Format.R32_UInt });
         _commandList.IASetPrimitiveTopology(Vortice.Direct3D.PrimitiveTopology.TriangleStrip);
 
         var srvGpu = _cbvSrvUavHeap.GetGPUDescriptorHandleForHeapStart();
-        _commandList.SetGraphicsRootDescriptorTable(3, srvGpu);
+        _commandList.SetGraphicsRootDescriptorTable(4, srvGpu);
 
         // Layer 0 → shared texture
         _commandList.ResourceBarrierTransition(_layerTex0, _firstFrame ? ResourceStates.Common : ResourceStates.PixelShaderResource, ResourceStates.RenderTarget);
@@ -2209,7 +2281,7 @@ public class DX12Renderer : IRenderer
 
         var layerSrv = srvGpu;
         layerSrv += (int)(_srvDescriptorSize * 2);
-        _commandList.SetGraphicsRootDescriptorTable(3, layerSrv);
+        _commandList.SetGraphicsRootDescriptorTable(4, layerSrv);
 
         if (_compositePSO != null)
         {
@@ -2225,6 +2297,146 @@ public class DX12Renderer : IRenderer
         _commandQueue.Signal(_fence, _fenceValue);
         _frameIndex = (int)(_frameIndex + 1) % FrameCount;
         _firstFrame = false;
+
+        RenderLatencyMs = (float)(_renderTimer.ElapsedTicks - _renderStartTicks) / System.Diagnostics.Stopwatch.Frequency * 1000f;
+    }
+
+    // VR RTV descriptor heap for OpenXR swapchain textures
+    private ID3D12DescriptorHeap? _vrRtvHeap;
+    private bool _vrRtvHeapInitialized;
+
+    /// <summary>
+    /// Render the current scene into an OpenXR swapchain texture.
+    /// The texture is a native ID3D12Resource pointer from OpenXR.
+    /// VR constant buffer (b3) must be updated before calling this.
+    /// </summary>
+    /// <param name="destNativePtr">Native ID3D12Resource pointer from OpenXR swapchain</param>
+    /// <param name="width">Texture width (eye resolution width)</param>
+    /// <param name="height">Texture height (eye resolution height)</param>
+    /// <param name="time">Absolute time for animation</param>
+    public void RenderToVRTexture(IntPtr destNativePtr, int width, int height, float time)
+    {
+        if (destNativePtr == IntPtr.Zero) return;
+        _renderStartTicks = _renderTimer.ElapsedTicks;
+        _deltaTime = time - _time;
+        _time = time;
+
+        WaitForGpu();
+        _commandAllocators[_frameIndex].Reset();
+        _commandList.Reset(_commandAllocators[_frameIndex], null);
+
+        // Create VR RTV heap if needed (1 descriptor, reused per eye)
+        if (!_vrRtvHeapInitialized)
+        {
+            _vrRtvHeap = _device.CreateDescriptorHeap(new DescriptorHeapDescription
+            {
+                DescriptorCount = 1,
+                Type = DescriptorHeapType.RenderTargetView,
+                Flags = DescriptorHeapFlags.None,
+            });
+            _vrRtvHeapInitialized = true;
+        }
+
+        // Wrap native pointer as ID3D12Resource (OpenXR owns the texture, we don't dispose)
+        var destResource = new ID3D12Resource(destNativePtr);
+        try
+        {
+            // Create RTV for this swapchain image
+            _device.CreateRenderTargetView(destResource, null, _vrRtvHeap!.GetCPUDescriptorHandleForHeapStart());
+
+            // Spectrum texture upload if dirty
+            if (_spectrumDirty)
+            {
+                var srcLoc = new TextureCopyLocation(_spectrumUploadBuffer, new PlacedSubresourceFootPrint
+                {
+                    Offset = 0, Footprint = new SubresourceFootPrint { Format = Format.R32_Float, Width = 1024, Height = 1, Depth = 1, RowPitch = _spectrumUploadSize }
+                });
+                _commandList.CopyTextureRegion(new TextureCopyLocation(_spectrumTexture, 0), 0, 0, 0, srcLoc, null);
+                _commandList.ResourceBarrierTransition(_spectrumTexture, ResourceStates.CopyDest, ResourceStates.PixelShaderResource);
+                _spectrumDirty = false;
+            }
+
+            // Set viewport to eye resolution
+            _commandList.RSSetViewports(new Viewport(0, 0, width, height));
+            _commandList.RSSetScissorRects(new Vortice.RawRect(0, 0, width, height));
+            _commandList.SetGraphicsRootSignature(_rootSignature);
+            _commandList.SetDescriptorHeaps(new[] { _cbvSrvUavHeap, _samplerHeap });
+
+            // Bind all constant buffers including VR (b3)
+            _commandList.SetGraphicsRootConstantBufferView(0, _audioCB.GPUVirtualAddress);
+            _commandList.SetGraphicsRootConstantBufferView(1, _timeCB.GPUVirtualAddress);
+            _commandList.SetGraphicsRootConstantBufferView(2, _dspCB.GPUVirtualAddress);
+            _commandList.SetGraphicsRootConstantBufferView(3, _vrCB.GPUVirtualAddress);
+
+            _commandList.IASetVertexBuffers(0, new VertexBufferView
+            {
+                BufferLocation = _vertexBuffer.GPUVirtualAddress,
+                SizeInBytes = 4 * 5 * sizeof(float),
+                StrideInBytes = 5 * sizeof(float),
+            });
+            _commandList.IASetIndexBuffer(new IndexBufferView
+            {
+                BufferLocation = _indexBuffer.GPUVirtualAddress,
+                SizeInBytes = 6 * sizeof(uint),
+                Format = Format.R32_UInt,
+            });
+            _commandList.IASetPrimitiveTopology(Vortice.Direct3D.PrimitiveTopology.TriangleStrip);
+
+            // SRV descriptor table (root param 4)
+            var srvGpuHandle = _cbvSrvUavHeap.GetGPUDescriptorHandleForHeapStart();
+            _commandList.SetGraphicsRootDescriptorTable(4, srvGpuHandle);
+
+            // ── Layer 0: Mode shader → _layerTex0 ──
+            _commandList.ResourceBarrierTransition(_layerTex0,
+                _firstFrame ? ResourceStates.Common : ResourceStates.PixelShaderResource,
+                ResourceStates.RenderTarget);
+            var layer0Rtv = _rtvHeapLayer.GetCPUDescriptorHandleForHeapStart();
+            _commandList.ClearRenderTargetView(layer0Rtv, new Color4(0, 0, 0, 1));
+            _commandList.OMSetRenderTargets(layer0Rtv, null);
+
+            if (_modeNames.Count > 0 && _pixelShaders.TryGetValue(_modeNames[_currentMode], out var modePSO))
+            {
+                _commandList.SetPipelineState(modePSO);
+                _commandList.DrawInstanced(4, 1, 0, 0);
+            }
+
+            // ── Composite: _layerTex0 → VR swapchain texture ──
+            _commandList.ResourceBarrierTransition(_layerTex0, ResourceStates.RenderTarget, ResourceStates.PixelShaderResource);
+            _commandList.ResourceBarrierTransition(destResource, ResourceStates.Common, ResourceStates.RenderTarget);
+
+            var vrRtv = _vrRtvHeap.GetCPUDescriptorHandleForHeapStart();
+            _commandList.ClearRenderTargetView(vrRtv, new Color4(0, 0, 0, 1));
+            _commandList.OMSetRenderTargets(vrRtv, null);
+
+            // Bind layer0 as SRV (descriptor index 2 = layer0)
+            var layerSrv = srvGpuHandle + (int)(_srvDescriptorSize * 2);
+            _commandList.SetGraphicsRootDescriptorTable(4, layerSrv);
+
+            if (_compositePSO != null)
+            {
+                _commandList.SetPipelineState(_compositePSO);
+                _commandList.DrawInstanced(4, 1, 0, 0);
+            }
+
+            _commandList.ResourceBarrierTransition(destResource, ResourceStates.RenderTarget, ResourceStates.Common);
+
+            _commandList.Close();
+            _commandQueue.ExecuteCommandList(_commandList);
+
+            _fenceValue++;
+            _commandQueue.Signal(_fence, _fenceValue);
+            _frameIndex = (int)(_frameIndex + 1) % FrameCount;
+            _firstFrame = false;
+        }
+        finally
+        {
+            // Release the COM wrapper ref without destroying the underlying resource
+            // OpenXR owns the swapchain texture
+            if (destResource != null)
+            {
+                while (System.Runtime.InteropServices.Marshal.ReleaseComObject(destResource) > 0) { }
+            }
+        }
 
         RenderLatencyMs = (float)(_renderTimer.ElapsedTicks - _renderStartTicks) / System.Diagnostics.Stopwatch.Frequency * 1000f;
     }
@@ -2259,6 +2471,8 @@ public class DX12Renderer : IRenderer
         _audioCB?.Dispose();
         _timeCB?.Dispose();
         _dspCB?.Dispose();
+        _vrCB?.Dispose();
+        _vrRtvHeap?.Dispose();
         _spectrumTexture?.Dispose();
         _spectrumUploadBuffer?.Dispose();
 

@@ -1,50 +1,52 @@
-// Mode 39: Acoustic Hologram Projector — sci-fi volumetric hologram table
+// RS by Resonance — RapidSpectrum Visualizer
+// HUD Mode 40: Acoustic Hologram Projector — sci-fi volumetric hologram table
+// VR Layer mode. Uses spatial_encoder.hlsl with SE_PROFILE_WAVE_FIELD.
+//
+// 48 emitters (8 bands × 3 sub × L/R) placed as wave field sources.
 // A glowing pedestal projects a 3D frequency surface that morphs with audio.
 // Bass = base geometry shape, mids = surface displacement/waves,
 // highs = particle details/sparkles above surface.
 // Beat = hologram pulse ring. Kick = geometry spike.
-// Transient = glitch/scan distortion. LUFS = hologram opacity/brightness.
-// Crest = edge sharpness. THD = scan line jitter. Phase = L/R surface symmetry.
+// Transient = glitch/scan distortion.
+//
+// World: grid floor as pedestal, fog density 0.06, dark ambient.
+// Camera: orbit around hologram table, FOV 0.6 (VR: head pose from OpenXR).
+// Visual: projected grid points with height from emitter-driven wave field + wireframe.
+//
+// DSP: LUFS→hologram opacity, crest→edge sharpness, THD→scan line jitter, phase→L/R symmetry.
+// HDR output to Layer 0. No local postfx. Pipeline owns bloom/tonemap.
 
-#include "include/audio_cb.hlsl"
-#include "include/dsp_cb.hlsl"
-#include "include/color_utils.hlsl"
-#include "include/noise.hlsl"
-#include "include/sdf.hlsl"
-#include "include/raymarch.hlsl"
-#include "include/audio_reactive.hlsl"
+#include "include/spatial_encoder.hlsl"
 #include "include/layers.hlsl"
 
 #define PI 3.14159265
-#define N_COMP 8
 #define GRID_RES 6
-#define MARCH_STEPS 32
 
-static const float bandFreq[8] = {
-    0.02, 0.06, 0.12, 0.20, 0.30, 0.42, 0.55, 0.70
-};
-
-float hologramHeight(float2 xz, float bands[8], float beatPulse, float beatPhase,
-                     float transient, float envelope, float kickSurge, float thd, float silence)
+// ── Hologram heightfield — driven by emitter positions ──
+float hologramHeight(float2 xz, SeEmitter emit[SE_NUM_OBJ],
+                     float beatPulse, float beatPhase, float transientAmt, float envelope,
+                     float kickSurge, float thd, float silence)
 {
     float r = length(xz);
     if (r > 2.0) return -1.0;
 
     float h = 0.0;
 
-    // Bass — base dome shape
-    h += bands[0] * 0.3 * smoothstep(2.0, 0.0, r);
-    h += bands[1] * 0.2 * sin(r * 3.0 - Time * 1.5);
+    // Per-emitter wave contributions
+    [loop] for (int n = 0; n < SE_NUM_OBJ; n++) {
+        if (emit[n].active < 0.01) continue;
+        if (emit[n].intensity < 0.05) continue;
 
-    // Mids — surface ripples
-    h += bands[2] * 0.15 * sin(xz.x * 4.0 + Time * 2.0) * cos(xz.y * 4.0 + Time * 1.5);
-    h += bands[3] * 0.12 * fbm2_4(xz * 3.0 + Time * 0.5);
-    h += bands[4] * 0.10 * sin(xz.x * 8.0 + Time * 3.0) * sin(xz.y * 8.0 - Time * 2.0);
+        float2 srcPos = emit[n].worldPos.xz;
+        float d = length(xz - srcPos);
+        float bandFrac = float(emit[n].bandIdx) / 7.0;
 
-    // Highs — fine detail
-    h += bands[5] * 0.06 * fbm2_4(xz * 8.0 + Time * 1.0);
-    h += bands[6] * 0.04 * sin(xz.x * 16.0 + Time * 5.0) * sin(xz.y * 16.0 - Time * 4.0);
-    h += bands[7] * 0.02 * hash21(xz * 50.0 + Time * 10.0);
+        // Bass = long wavelength dome, highs = fine ripples
+        float wavelength = lerp(3.0, 0.3, bandFrac);
+        float amp = emit[n].intensity * lerp(0.15, 0.03, bandFrac);
+
+        h += amp * sin(d * (2.0 * PI / wavelength) - Time * (1.0 + bandFrac * 3.0));
+    }
 
     // Beat — radial pulse
     h += beatPulse * 0.08 * sin(r * 5.0 - beatPhase * 6.0) * exp(-r * 0.5) * silence;
@@ -53,8 +55,8 @@ float hologramHeight(float2 xz, float bands[8], float beatPulse, float beatPhase
     h += kickSurge * 0.15 * exp(-r * r * 4.0) * silence;
 
     // Transient — glitch displacement
-    if (transient > 0.02)
-        h += transient * 0.04 * sin(xz.x * 30.0 + xz.y * 28.0 + beatPhase * 40.0) * silence;
+    if (transientAmt > 0.02)
+        h += transientAmt * 0.04 * sin(xz.x * 30.0 + xz.y * 28.0 + beatPhase * 40.0) * silence;
 
     // Envelope — global swell
     h += envelope * 0.03 * smoothstep(2.0, 0.0, r) * silence;
@@ -72,54 +74,68 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target
     float r = length(p);
     float silence = 1.0 - a.isSilent;
 
+    // ── DSP additive ──
     float lufs = lufsNormalized();
     float crest = crestFactorNormalized();
     float thd = thdNormalized();
     float phaseCoh = phaseCoherence();
+    float phaseCorr = phaseCoherence();
 
-    float bands[8] = { a.b0, a.b1, a.b2, a.b3, a.b4, a.b5, a.b6, a.b7 };
-    // Spectrum L/R — augment brain bands with stereo spectrum data
-    float specL[8]; float specR[8];
-    [unroll] for (int sb = 0; sb < 8; sb++) {
-        specL[sb] = u_spectrum.SampleLevel(u_sampler, float2(bandFreq[sb], 0.166), 0).r;
-        specR[sb] = u_spectrum.SampleLevel(u_sampler, float2(bandFreq[sb], 0.833), 0).r;
-        bands[sb] = max(bands[sb], max(specL[sb], specR[sb]) * 0.5);
-    }
-    float panMod = (specL[0] + specL[1] - specR[0] - specR[1]) * 0.25;
+    // ── Audio dynamics ──
     float beatPulse = a.beat * a.tempoConf;
     float kickSurge = a.kick * a.kickConf * exp(-a.beatPhase * 3.0);
     float transientAmt = a.transient;
     float envelope = a.envelope;
-    float phrase = phrasePulse(a);
 
-    // ── Camera — orbit around hologram table ──
-    float FOV = 0.6;
-    float camAng = a.section * 0.8 + a.stereoBal * 0.2 + panMod * 0.3;
-    float3 camPos = float3(sin(camAng) * 3.0, 2.0, cos(camAng) * 3.0);
-    float3 camTarget = float3(0, 0.5, 0);
-    float3 fwd = normalize(camTarget - camPos);
-    float3 right = normalize(cross(fwd, float3(0, 1, 0)));
-    float3 up = cross(right, fwd);
+    // ── Camera — VR head pose or desktop orbit ──
+    SeCamera cam;
+    if (VR_ACTIVE) {
+        cam = seCameraVR();
+    } else {
+        float FOV = 0.6;
+        float camAng = a.section * 0.8 + a.stereoBal * 0.2;
+        float3 camPos = float3(sin(camAng) * 3.0, 2.0, cos(camAng) * 3.0);
+        cam = seCamera(camPos, float3(0, 0.5, 0), FOV);
+    }
 
-    // ── Background — dark tech room ──
-    float3 col = float3(0.001, 0.002, 0.004) * silence;
+    // ── Spatial encoder: WAVE_FIELD profile ──
+    SeParams params = seParams(SE_PROFILE_WAVE_FIELD);
+    params.widthScale = 2.5;
+    params.heightScale = 1.5;
+    params.depthScale = 2.5;
+    params.jitterAmt = 0.15 + thd * 0.25;
+
+    float bands[8] = { a.b0, a.b1, a.b2, a.b3, a.b4, a.b5, a.b6, a.b7 };
+
+    SeEmitter emit[SE_NUM_OBJ];
+    seComputeEmitters(emit, bands, a, cam, params,
+                      lufs, crest, thd, phaseCoh,
+                      beatPulse, kickSurge, transientAmt, envelope);
+
+    // ── World environment ──
+    SeWorld world = seWorld(0.06, float3(0.01, 0.008, 0.02), -1.0, 0.0, 0.0);
+    world.gridIntensity = 0.03;
+    world.ambientLevel = 0.004;
+    world.ambientColor = float3(0.02, 0.02, 0.04);
+    seApplyWorldFog(emit, world);
+
+    // ── Background — dark tech room + world env ──
+    float3 col = seWorldEnvironment(p, cam, world, a, kickSurge, silence);
     col += starfield(uv, a) * 0.005;
 
     // ── Pedestal — glowing base disc ──
     {
-        float3 pedPos = float3(0, 0, 0);
-        float3 toPed = pedPos - camPos;
-        float pedDepth = dot(toPed, fwd);
+        float3 toPed = float3(0, 0, 0) - cam.pos;
+        float pedDepth = dot(toPed, cam.fwd);
         if (pedDepth > 0.1) {
-            float2 scrPed = float2(dot(toPed, right) / (pedDepth * FOV), dot(toPed, up) / (pedDepth * FOV));
-            float pedR = 2.2 / (pedDepth * FOV);
+            float2 scrPed = float2(dot(toPed, cam.right) / (pedDepth * cam.fov),
+                                   dot(toPed, cam.up) / (pedDepth * cam.fov));
+            float pedR = 2.2 / (pedDepth * cam.fov);
             float pedDist = length(p - scrPed);
-            // Disc edge glow
             float edgeDist = abs(pedDist - pedR);
-            col += a.brainCol * exp(-edgeDist * edgeDist * 30.0) * 0.15 * (0.5 + envelope * 0.5) * silence;
-            // Disc surface — concentric rings
+            col += a.brainCol * exp(-edgeDist * edgeDist * 30.0) * 0.12 * (0.5 + envelope * 0.5) * silence;
             float ringPattern = sin(pedDist * 20.0 - Time * 2.0) * 0.5 + 0.5;
-            col += a.brainCol2 * ringPattern * exp(-pedDist * pedDist / (pedR * pedR)) * 0.02 * silence;
+            col += a.brainCol2 * ringPattern * exp(-pedDist * pedDist / (pedR * pedR)) * 0.015 * silence;
         }
     }
 
@@ -129,103 +145,118 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target
             float2 gridUV = float2(float(gx), float(gz)) / float(GRID_RES);
             float2 xz = (gridUV - 0.5) * 4.0;
 
-            float h = hologramHeight(xz, bands, beatPulse, a.beatPhase, transientAmt, envelope, kickSurge, thd, silence);
+            float h = hologramHeight(xz, emit, beatPulse, a.beatPhase, transientAmt, envelope, kickSurge, thd, silence);
             if (h < -0.5) continue;
 
             float3 hp = float3(xz.x, h + 0.5, xz.y);
-            float3 toHP = hp - camPos;
-            float hpDepth = dot(toHP, fwd);
+            float3 toHP = hp - cam.pos;
+            float hpDepth = dot(toHP, cam.fwd);
             if (hpDepth < 0.1) continue;
-            float2 scrHP = float2(dot(toHP, right) / (hpDepth * FOV), dot(toHP, up) / (hpDepth * FOV));
+            float2 scrHP = float2(dot(toHP, cam.right) / (hpDepth * cam.fov),
+                                  dot(toHP, cam.up) / (hpDepth * cam.fov));
             float scrDist = length(p - scrHP);
 
-            // Frequency-positioned color
             float freqFrac = length(xz) / 2.0;
             float3 holoCol = hsv(a.hueBase + freqFrac * a.hueRange, 0.6 * a.satur, 0.9);
             holoCol = lerp(holoCol, lerp(a.brainCol, a.brainCol2, freqFrac), 0.3);
 
-            // Point glow
             float ptSize = 0.008 / max(hpDepth * 0.15, 0.3) * 3.0;
             float ptGlow = exp(-scrDist * scrDist / (ptSize * ptSize));
 
-            // Height-based intensity
             float intensity = (abs(h) * 3.0 + 0.1) * (1.0 + lufs * 0.2);
-            float depthFade = exp(-hpDepth * 0.06);
+            float depthFade = exp(-hpDepth * world.fogDensity);
 
             // Scan line effect — THD
             float scanLine = sin(hp.y * 50.0 + Time * 10.0) * 0.5 + 0.5;
             scanLine = lerp(1.0, scanLine, thd * 0.3);
 
-            col += holoCol * ptGlow * intensity * depthFade * scanLine * 0.4 * silence;
+            col += holoCol * ptGlow * intensity * depthFade * scanLine * 0.15 * silence;
 
             // Wireframe connections to neighbors
             if (gx < GRID_RES) {
                 float2 xz2 = float2(float(gx + 1), float(gz)) / float(GRID_RES);
                 xz2 = (xz2 - 0.5) * 4.0;
-                float h2 = hologramHeight(xz2, bands, beatPulse, a.beatPhase, transientAmt, envelope, kickSurge, thd, silence);
+                float h2 = hologramHeight(xz2, emit, beatPulse, a.beatPhase, transientAmt, envelope, kickSurge, thd, silence);
                 if (h2 > -0.5) {
                     float3 hp2 = float3(xz2.x, h2 + 0.5, xz2.y);
-                    float3 toHP2 = hp2 - camPos;
-                    float hp2Depth = dot(toHP2, fwd);
+                    float3 toHP2 = hp2 - cam.pos;
+                    float hp2Depth = dot(toHP2, cam.fwd);
                     if (hp2Depth > 0.1) {
-                        float2 scrHP2 = float2(dot(toHP2, right) / (hp2Depth * FOV), dot(toHP2, up) / (hp2Depth * FOV));
+                        float2 scrHP2 = float2(dot(toHP2, cam.right) / (hp2Depth * cam.fov),
+                                              dot(toHP2, cam.up) / (hp2Depth * cam.fov));
                         float2 ab = scrHP2 - scrHP;
                         float t = clamp(dot(p - scrHP, ab) / max(dot(ab, ab), 0.0001), 0.0, 1.0);
                         float2 closest = scrHP + ab * t;
                         float wireDist = length(p - closest);
                         float wireGlow = exp(-wireDist * wireDist * 200.0);
-                        col += holoCol * wireGlow * intensity * depthFade * 0.1 * silence;
+                        col += holoCol * wireGlow * intensity * depthFade * 0.03 * silence;
                     }
                 }
             }
             if (gz < GRID_RES) {
                 float2 xz2 = float2(float(gx), float(gz + 1)) / float(GRID_RES);
                 xz2 = (xz2 - 0.5) * 4.0;
-                float h2 = hologramHeight(xz2, bands, beatPulse, a.beatPhase, transientAmt, envelope, kickSurge, thd, silence);
+                float h2 = hologramHeight(xz2, emit, beatPulse, a.beatPhase, transientAmt, envelope, kickSurge, thd, silence);
                 if (h2 > -0.5) {
                     float3 hp2 = float3(xz2.x, h2 + 0.5, xz2.y);
-                    float3 toHP2 = hp2 - camPos;
-                    float hp2Depth = dot(toHP2, fwd);
+                    float3 toHP2 = hp2 - cam.pos;
+                    float hp2Depth = dot(toHP2, cam.fwd);
                     if (hp2Depth > 0.1) {
-                        float2 scrHP2 = float2(dot(toHP2, right) / (hp2Depth * FOV), dot(toHP2, up) / (hp2Depth * FOV));
+                        float2 scrHP2 = float2(dot(toHP2, cam.right) / (hp2Depth * cam.fov),
+                                              dot(toHP2, cam.up) / (hp2Depth * cam.fov));
                         float2 ab = scrHP2 - scrHP;
                         float t = clamp(dot(p - scrHP, ab) / max(dot(ab, ab), 0.0001), 0.0, 1.0);
                         float2 closest = scrHP + ab * t;
                         float wireDist = length(p - closest);
                         float wireGlow = exp(-wireDist * wireDist * 200.0);
-                        col += holoCol * wireGlow * intensity * depthFade * 0.1 * silence;
+                        col += holoCol * wireGlow * intensity * depthFade * 0.03 * silence;
                     }
                 }
             }
         }
     }
 
+    // ── Emitter glow — depth-aware, VR or desktop ──
+    if (VR_ACTIVE) {
+        float3 headPos = float3(VRHeadPos.xyz);
+        [loop] for (int j = 0; j < SE_NUM_OBJ; j++) {
+            if (emit[j].active < 0.01 || emit[j].depth < 0.1) continue;
+            col += seEmitGlowVR(p, emit[j], world, headPos, silence);
+        }
+    } else {
+        [loop] for (int j = 0; j < SE_NUM_OBJ; j++) {
+            if (emit[j].active < 0.01 || emit[j].depth < 0.1) continue;
+            col += seEmitGlowDepth(p, emit[j], world, lufs, crest, beatPulse,
+                                   a.beatPhase, kickSurge, transientAmt, silence);
+        }
+    }
+
+    // ── L↔R links ──
+    [loop] for (int lb = 0; lb < SE_N_BANDS; lb++) {
+        col += seLinkLR(p, emit, lb, phaseCorr, phaseCoh, silence);
+    }
+
+    // ── Listener focal point ──
+    col += seListener(p, cam, a, beatPulse, kickSurge, silence);
+
     // ── High-band sparkles above surface ──
-    float sparkle = (bands[6] + bands[7]) * hash21(p * 80.0 + Time * 30.0) * 0.03;
+    float sparkle = (a.b6 + a.b7) * hash21(p * 80.0 + Time * 30.0) * 0.025;
     col += float3(0.8, 0.9, 1.0) * sparkle * silence;
-
-    // ── Beat ring ──
-    float ringDist = abs(r - a.beatPhase * 0.7);
-    col += a.brainCol * exp(-ringDist * ringDist * 40.0) * beatPulse * 0.025 * silence;
-
-    // ── Kick flash ──
-    col += a.brainCol3 * kickSurge * 0.05 * exp(-r * r * 5.0) * silence;
 
     // ── Transient — glitch scan ──
     if (transientAmt > 0.02) {
-        float glitch = sin(p.y * 100.0 + Time * 50.0) * transientAmt * 0.03;
+        float glitch = sin(p.y * 100.0 + Time * 50.0) * transientAmt * 0.025;
         col += a.brainCol2 * abs(glitch) * silence;
     }
 
-    // ── ColorPulse ──
-    col += a.brainCol3 * a.colorPulse * 0.02 * silence;
-
-    // ── Energy + punch ──
-    col += a.brainCol2 * a.energy * 0.015 * silence;
-    col += a.brainCol * a.punch * 0.015 * silence;
-
-    // ── Beat anticipation ──
-    col += a.brainCol * a.beatAnt * 0.01 * exp(-r * 2.0) * silence;
+    // ── Mode-specific overlays — subtle ──
+    float ringDist = abs(r - a.beatPhase * 0.7);
+    col += a.brainCol * exp(-ringDist * ringDist * 40.0) * beatPulse * 0.02 * silence;
+    col += a.brainCol3 * kickSurge * 0.04 * exp(-r * r * 5.0) * silence;
+    col += a.brainCol3 * a.colorPulse * 0.015 * silence;
+    col += a.brainCol2 * a.energy * 0.01 * silence;
+    col += a.brainCol * a.punch * 0.01 * silence;
+    col += a.brainCol * a.beatAnt * 0.008 * exp(-r * 2.0) * silence;
 
     // ── Dynamic range ──
     col *= (0.3 + a.gated * 0.7);
@@ -233,9 +264,10 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target
     // ── Standard overlays ──
     col += standardOverlays(p, r, a) * 0.02;
 
-    // ── HDR limiter ──
-    float maxC = max(col.r, max(col.g, col.b));
-    if (maxC > 1.14) col *= 1.14 / maxC;
+        // ── Active-emitter normalization — busy music doesn't stack brighter ──
+    col *= sqrt(16.0 / seActiveCount(emit));
+    // ── Soft tone mapping (Reinhard) — no hard clamp, preserves color ──
+    col = softReinhard(col);
 
     col *= silence;
 

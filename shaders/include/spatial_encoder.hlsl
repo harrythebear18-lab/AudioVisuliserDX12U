@@ -72,6 +72,24 @@ SeCamera seCamera(float3 pos, float3 target, float fov) {
     return cam;
 }
 
+// VR camera from OpenXR head pose — uses head position + orientation from VRCB
+// Applies IPD offset based on eye index. Falls back to target=origin if no VR.
+SeCamera seCameraVR() {
+    SeCamera cam;
+    float3 headPos = VRHeadPos.xyz;
+    float3 fwd, right, up;
+    vrHeadBasis(fwd, right, up);
+    // IPD offset — shift camera horizontally by half IPD per eye
+    float eyeOffset = (VR_EYE_INDEX * 2.0 - 1.0) * VR_IPD * 0.5;
+    cam.pos = headPos + right * eyeOffset;
+    cam.fwd = fwd;
+    cam.right = right;
+    cam.up = up;
+    cam.target = headPos + fwd;  // synthetic target for compatibility
+    cam.fov = VR_ACTIVE ? VR_FOV : 0.75;
+    return cam;
+}
+
 // ── Spatial Emitter ──
 struct SeEmitter {
     float3 worldPos;
@@ -233,8 +251,14 @@ float3 seEncodePosition(int bandIdx, int subIdx, int side,
         // Azimuth from stereo pan (HRTF-inspired horizontal plane, ±60°)
         float azimuth = sideSign * (0.35 + panMod * 0.35) * PI;  // up to ~63°
         azimuth += crossMix * 0.2 * sideSign;  // convergence toward center
-        // Elevation from band frequency (bass=low, treble=high, ±45°)
-        float elevation = lerp(-0.35, 0.55, bandFrac) + subFrac * 0.15;
+        // Band spread anti-clustering — prevent adjacent bands from overlapping
+        float bandSpread = bandFrac;
+        azimuth += sign(params.stereoBal) * pow(bandSpread, 1.2) * 0.15;
+        // Non-linear elevation scaling — pow(0.85) expands mid-range separation
+        // Human ear resolves high-freq elevation via pinna cues (subtle over stereo)
+        // This gives bands 2-5 more vertical breathing room around 1-4kHz presence range
+        float elevationNorm = pow(bandFrac, 0.85);
+        float elevation = lerp(-0.35, 0.55, elevationNorm) + subFrac * 0.15;
         elevation += transientScatter * 0.1;
         // Distance from energy (loud=close, quiet=far) — inverse loudness
         float dist = lerp(0.8, params.depthScale, 1.0 - saturate(energy * 2.5));
@@ -798,6 +822,98 @@ float3 seRenderWorld(float2 p, SeEmitter emit[SE_NUM_OBJ], SeCamera cam, SeWorld
     col += seListener(p, cam, a, beatPulse, kickLunge, silence);
 
     return col;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// VR GLOW — head-relative depth-aware emitter rendering for OpenXR
+// Uses head position instead of camera position for distance calculations.
+// Far-field desaturation mimics atmospheric HF absorption.
+// Softer halo for VR comfort — no harsh edges at periphery.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+float3 seEmitGlowVR(float2 p, SeEmitter e, SeWorld world,
+                    float3 headPos, float silence)
+{
+    // 1. Distance from head to emitter in world space
+    float distToHead = length(e.worldPos - headPos);
+    float depthFog = exp(-distToHead * world.fogDensity);
+
+    // 2. Early cull — skip if too far or silent
+    if (depthFog < 0.01 || silence > 0.95) return float3(0, 0, 0);
+
+    // 3. Perspective-guarded size scaling
+    float perspectiveScale = 1.0 / max(distToHead * 0.35, 0.2);
+    float finalSize = e.screenSize * perspectiveScale;
+
+    // 4. Screen-space distance
+    float2 diff = p - e.screenPos;
+    float d = length(diff);
+
+    // 5. Core/halo with VR-comfort softening
+    float core = exp(-d * d * (12.0 / max(finalSize, 0.001)));
+    float halo = exp(-d * (3.0 / max(finalSize, 0.001))) * 0.3;
+
+    // 6. Far-field desaturation — mimics atmospheric HF absorption
+    float lum = dot(e.color, float3(0.299, 0.587, 0.114));
+    float3 desatColor = lerp(float3(lum, lum, lum), e.color, depthFog);
+
+    // 7. Final glow — intensity modulated by depth fog
+    float3 finalGlow = (core + halo) * desatColor * e.intensity * depthFog;
+
+    return finalGlow * silence;
+}
+
+// Full VR render pass — world environment + VR glow + listener
+float3 seRenderWorldVR(float2 p, SeEmitter emit[SE_NUM_OBJ], SeCamera cam, SeWorld world,
+                       float3 headPos, AudioData a, float beatPulse, float kickSurge,
+                       float phaseCorr, float phaseCoh, float silence)
+{
+    float3 col = float3(0, 0, 0);
+
+    // World environment first (background)
+    col += seWorldEnvironment(p, cam, world, a, kickSurge, silence);
+
+    // Emitters with VR glow
+    [loop] for (int ri = 0; ri < SE_NUM_OBJ; ri++) {
+        if (emit[ri].active < 0.01) continue;
+        if (emit[ri].depth < 0.1) continue;
+        col += seEmitGlowVR(p, emit[ri], world, headPos, silence);
+    }
+
+    // L↔R links
+    [loop] for (int lb = 0; lb < SE_N_BANDS; lb++) {
+        col += seLinkLR(p, emit, lb, phaseCorr, phaseCoh, silence);
+    }
+
+    // Listener focal point
+    col += seListener(p, cam, a, beatPulse, kickSurge, silence);
+
+    return col;
+}
+
+// ── Active emitter count — for additive budget normalization ──
+// Counts all active emitters (intensity > threshold)
+float seActiveCount(SeEmitter emit[SE_NUM_OBJ]) {
+    float count = 0.0;
+    [loop] for (int i = 0; i < SE_NUM_OBJ; i++) {
+        if (emit[i].active > 0.01 && emit[i].intensity > 0.05)
+            count += 1.0;
+    }
+    return max(count, 1.0);
+}
+
+// Active count for 16-source culled rendering (only center sub si=1)
+float seActiveCountCulled(SeEmitter emit[SE_NUM_OBJ]) {
+    float count = 0.0;
+    [loop] for (int bi = 0; bi < SE_N_BANDS; bi++) {
+        int li = bi * SE_N_SUB * 2 + 2;
+        int ri = bi * SE_N_SUB * 2 + 3;
+        if (emit[li].active > 0.01 && emit[li].intensity > 0.05)
+            count += 1.0;
+        if (emit[ri].active > 0.01 && emit[ri].intensity > 0.05)
+            count += 1.0;
+    }
+    return max(count, 1.0);
 }
 
 #endif // SPATIAL_ENCODER_HLSL

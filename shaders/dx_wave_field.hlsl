@@ -1,86 +1,103 @@
-// Mode 48: Spatiotemporal Wave Field — 3D wave propagation from audio sources
-// Reference implementation of the Spatial Pipeline architecture.
-// 48 pre-computed 3D emitters (8 bands × 3 sub-freq × L/R) from stereo spectrum.
+// RS by Resonance — RapidSpectrum Visualizer
+// HUD Mode 49: Spatiotemporal Wave Field — 3D wave propagation from audio sources
+// VR Layer mode. Uses spatial_encoder.hlsl with SE_PROFILE_WAVE_FIELD.
+//
+// 48 emitters (8 bands × 3 sub × L/R) placed as a flat wave field.
 // X = stereo side (L/R cross-over), Y = frequency band, Z = amplitude depth.
 // Visual identity: 3D wave grid with expanding spherical wavefronts and interference links.
+//
+// World: grid floor + back wall for depth grounding, fog density 0.04, dark ambient.
+// Camera: orbiting the wave field, FOV 0.75 (VR: head pose from OpenXR).
+// Visual: emitter glow with wave rings, L/R interference links, listener focal point.
+//
+// DSP: LUFS→emission brightness, crest→glow sharpness, THD→jitter, phase→link coherence.
+// HDR output to Layer 0. No local postfx. Pipeline owns bloom/tonemap.
 
-#include "include/audio_cb.hlsl"
-#include "include/dsp_cb.hlsl"
-#include "include/color_utils.hlsl"
-#include "include/noise.hlsl"
-#include "include/audio_reactive.hlsl"
+#include "include/spatial_encoder.hlsl"
 #include "include/layers.hlsl"
-#include "include/spatial_pipeline.hlsl"
 
 #define PI 3.14159265
 
-float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
+float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target
+{
     AudioData a = extractAudio();
     float2 p = screenToAspect(uv);
     float r = length(p);
     float silence = 1.0 - a.isSilent;
 
+    // ── DSP additive ──
     float lufs = lufsNormalized();
     float crest = crestFactorNormalized();
     float thd = thdNormalized();
     float phaseCoh = phaseCoherence();
+    float phaseCorr = phaseCoherence();
 
-    float bands[8] = { a.b0, a.b1, a.b2, a.b3, a.b4, a.b5, a.b6, a.b7 };
+    // ── Audio dynamics ──
     float beatPulse = a.beat * a.tempoConf;
     float kickSurge = a.kick * a.kickConf * exp(-a.beatPhase * 3.0);
     float transientAmt = a.transient;
     float envelope = a.envelope;
     float beatBright = a.beat * a.tempoConf;
 
-    // ── Camera ──
-    float camAng = a.section * 0.15 + a.stereoBal * 0.08 + Time * 0.005 * a.motSpeed;
-    float3 camPos = float3(sin(camAng) * 1.5, 1.5 + a.stereoDiff * 0.08, 2.8 + cos(camAng) * 0.3);
-    SpCamera cam = spCamera(camPos, float3(0, -0.3, -2.0), 0.75);
+    // ── Camera — VR head pose or desktop orbiting wave field ──
+    SeCamera cam;
+    if (VR_ACTIVE) {
+        cam = seCameraVR();
+    } else {
+        float camAng = a.section * 0.15 + a.stereoBal * 0.08 + Time * 0.005 * a.motSpeed;
+        float3 camPos = float3(sin(camAng) * 1.5, 1.5 + a.stereoDiff * 0.08, 2.8 + cos(camAng) * 0.3);
+        cam = seCamera(camPos, float3(0, -0.3, -2.0), 0.75);
+    }
 
-    float3 col = float3(0.002, 0.002, 0.006) * silence;
-    col += starfield(uv, a) * 0.008;
+    // ── Spatial encoder: WAVE_FIELD profile ──
+    SeParams params = seParams(SE_PROFILE_WAVE_FIELD);
+    params.widthScale = 1.8;
+    params.heightScale = 4.5;
+    params.depthScale = 5.0;
+    params.jitterAmt = 0.1 + thd * 0.15;
 
-    // ── Floor and wall grid (wave_field visual identity) ──
-    {
-        float3 rd = normalize(cam.fwd + p.x * cam.right * cam.fov + p.y * cam.up * cam.fov);
-        float tFloor = (-1.8 - cam.pos.y) / rd.y;
-        if (tFloor > 0.0 && tFloor < 25.0) {
-            float3 hitPos = cam.pos + rd * tFloor;
-            float2 gridUV = float2(hitPos.x * 2.0, -hitPos.z * 1.8);
-            float2 gridId = abs(frac(gridUV) - 0.5);
-            float gridLine = smoothstep(0.47, 0.5, max(gridId.x, gridId.y));
-            float gridFade = smoothstep(0.0, 8.0, tFloor) * smoothstep(25.0, 12.0, tFloor);
-            col += a.brainCol * gridLine * 0.04 * gridFade * silence;
-            col += a.brainCol2 * gridLine * kickSurge * 0.06 * gridFade * silence;
+    float bands[8] = { a.b0, a.b1, a.b2, a.b3, a.b4, a.b5, a.b6, a.b7 };
+
+    SeEmitter emit[SE_NUM_OBJ];
+    seComputeEmitters(emit, bands, a, cam, params,
+                      lufs, crest, thd, phaseCoh,
+                      beatPulse, kickSurge, transientAmt, envelope);
+
+    // ── World environment — floor + back wall (wave_field visual identity) ──
+    SeWorld world = seWorld(0.04, float3(0.003, 0.002, 0.008), -1.8, 0.0, -6.0);
+    world.gridScale = 2.0;
+    world.gridIntensity = 0.04;
+    world.ambientLevel = 0.004;
+    world.ambientColor = float3(0.01, 0.008, 0.02);
+    world.flags = 5;  // floor + back wall
+    seApplyWorldFog(emit, world);
+
+    // ── Background — dark wave field space + world env ──
+    float3 col = seWorldEnvironment(p, cam, world, a, kickSurge, silence);
+    col += starfield(uv, a) * 0.005;
+
+    // ── Emitter glow — depth-aware, VR or desktop ──
+    if (VR_ACTIVE) {
+        float3 headPos = float3(VRHeadPos.xyz);
+        [loop] for (int j = 0; j < SE_NUM_OBJ; j++) {
+            if (emit[j].active < 0.01 || emit[j].depth < 0.1) continue;
+            col += seEmitGlowVR(p, emit[j], world, headPos, silence);
         }
-        float tWall = (-6.0 - cam.pos.z) / rd.z;
-        if (tWall > 0.0) {
-            float3 hitPos = cam.pos + rd * tWall;
-            float2 wallUV = float2(hitPos.x * 1.8, hitPos.y * 1.8);
-            float2 wallId = abs(frac(wallUV) - 0.5);
-            float wallLine = smoothstep(0.47, 0.5, max(wallId.x, wallId.y));
-            float wallFade = smoothstep(0.0, 5.0, tWall) * smoothstep(25.0, 12.0, tWall);
-            col += a.brainCol2 * wallLine * 0.02 * wallFade * silence;
+    } else {
+        [loop] for (int j = 0; j < SE_NUM_OBJ; j++) {
+            if (emit[j].active < 0.01 || emit[j].depth < 0.1) continue;
+            col += seEmitGlowDepth(p, emit[j], world, lufs, crest, beatBright,
+                                   a.beatPhase, kickSurge, transientAmt, silence);
         }
     }
 
-    // ── Compute 48 spatial emitters from spectrum L/R ──
-    SpEmitter emit[SP_NUM_OBJ];
-    spComputeEmitters(emit, bands, a, cam, lufs, crest, thd, phaseCoh,
-                      beatPulse, kickSurge, transientAmt, envelope);
+    // ── L↔R links ──
+    [loop] for (int lb = 0; lb < SE_N_BANDS; lb++) {
+        col += seLinkLR(p, emit, lb, phaseCorr, phaseCoh, silence);
+    }
 
-    // ── Render all emitters + links via shared pipeline ──
-    col += spRenderAll(p, emit, lufs, crest, beatBright, a.beatPhase,
-                       kickSurge * 1.5, transientAmt, a.phaseCorr, phaseCoh, silence);
-
-    // ── Listener position — the "player" in the audio world ──
-    float2 listenerPos = spProject(float3(0, 0, -2.0), cam);
-    float listenDist = length(p - listenerPos);
-    col += a.brainCol * exp(-listenDist * listenDist * 100.0) * 0.1 * silence;
-
-    float beatPulseR = a.beatPhase * 0.2 * a.tempoConf;
-    col += a.brainCol2 * exp(-abs(listenDist - beatPulseR) * 35.0) * beatPulse * 0.15 * silence;
-    col += float3(1.0, 0.5, 0.15) * exp(-listenDist * listenDist * 8.0) * a.kick * 0.2 * a.kickConf * silence;
+    // ── Listener focal point ──
+    col += seListener(p, cam, a, beatPulse, kickSurge, silence);
 
     // ── Ambient energy ──
     col += a.brainCol2 * envelope * 0.006 * exp(-r * 2.5) * silence;
@@ -89,12 +106,18 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
     col += a.brainCol2 * a.punch * 0.005 * silence;
     col += a.brainCol * a.beatAnt * 0.008 * exp(-r * 2.0) * silence;
 
+    // ── Dynamic range ──
     col *= (0.3 + a.gated * 0.7);
+
+    // ── Standard overlays ──
     col += standardOverlays(p, r, a) * 0.02;
 
-    float maxC = max(col.r, max(col.g, col.b));
-    if (maxC > 1.14) col *= 1.14 / maxC;
+        // ── Active-emitter normalization — busy music doesn't stack brighter ──
+    col *= sqrt(16.0 / seActiveCount(emit));
+    // ── Soft tone mapping (Reinhard) — no hard clamp, preserves color ──
+    col = softReinhard(col);
 
     col *= silence;
+
     return float4(col, 1.0);
 }

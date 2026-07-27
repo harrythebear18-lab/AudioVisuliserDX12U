@@ -1,69 +1,47 @@
-// Mode 46: Acoustic Particle Hologram — GPU particles forming 3D audio shapes
-// A particle cloud that arranges into frequency surfaces, dissolves on transients,
-// and reforms on beats. Stereo = particle distribution L/R.
-// Profile = shape personality (diffuse vs compact). Beat = particle convergence.
+// RS by Resonance — RapidSpectrum Visualizer
+// HUD Mode 47: Acoustic Particle Hologram — GPU particles forming 3D audio shapes
+// VR Layer mode. Uses spatial_encoder.hlsl with SE_PROFILE_PSYCHOACOUSTIC.
+//
+// 48 emitters (8 bands × 3 sub × L/R) placed as psychoacoustic sources.
+// Each emitter spawns a particle cluster that converges on beats,
+// dissolves on transients, and explodes on kicks.
+// Stereo = particle distribution L/R. Beat = convergence.
 // Kick = explosion outward. Transient = dissolution + reformation.
-// LUFS = particle brightness. Crest = particle focus. THD = particle jitter.
+//
+// World: grid floor for depth grounding, fog density 0.05, dark ambient.
+// Camera: inside the particle cloud, FOV 0.75 (VR: head pose from OpenXR).
+// Visual: glowing particle clusters with trails between same-band emitters.
+//
+// DSP: LUFS→particle brightness, crest→particle focus, THD→particle jitter, phase→cluster coherence.
+// HDR output to Layer 0. No local postfx. Pipeline owns bloom/tonemap.
 
-#include "include/audio_cb.hlsl"
-#include "include/dsp_cb.hlsl"
-#include "include/color_utils.hlsl"
-#include "include/noise.hlsl"
-#include "include/raymarch.hlsl"
-#include "include/audio_reactive.hlsl"
+#include "include/spatial_encoder.hlsl"
 #include "include/layers.hlsl"
 
 #define PI 3.14159265
-#define N_COMP 8
-#define N_PARTICLES 24
-
-static const float bandFreq[8] = {
-    0.02, 0.06, 0.12, 0.20, 0.30, 0.42, 0.55, 0.70
-};
+#define N_PARTICLES 48
 
 struct Particle {
     float3 pos;
-    float3 vel;
     float energy;
     float gate;
     float freqFrac;
     float3 color;
 };
 
-void computeParticles(out Particle particles[N_PARTICLES], float bands[8], float dspBands[8],
-                      float kickSurge, float beatPulse, float stereoBal, float stereoWid,
-                      float crest, float thd, float transient, float envelope, float section,
-                      float phaseCoh, AudioData a)
+void computeParticlesFromEmitters(out Particle particles[N_PARTICLES], SeEmitter emit[SE_NUM_OBJ],
+                                  float kickSurge, float beatPulse, float transientAmt,
+                                  float thd, float envelope, float crest, AudioData a)
 {
     [unroll] for (int n = 0; n < N_PARTICLES; n++)
     {
-        int band = n / 3;
-        int sub = n % 3;
-        float bt = float(band) / float(N_COMP - 1);
-
-        float rawEnergy = bands[band] + dspBands[band] * 0.12;
-        float energy = (band < 4) ? pow(rawEnergy, 0.5) : rawEnergy;
-        float gate = smoothstep(0.02, 0.08, rawEnergy);
-
-        // Spectrum L/R — stereo spatial positioning
-        float freqU = bandFreq[band];
-        float lE = u_spectrum.SampleLevel(u_sampler, float2(freqU, 0.166), 0).r;
-        float rE = u_spectrum.SampleLevel(u_sampler, float2(freqU, 0.833), 0).r;
-        float stereoEnergy = max(lE, rE);
-        energy = max(energy, stereoEnergy * 0.5);
-        gate = max(gate, smoothstep(0.02, 0.08, stereoEnergy));
-        float panMod = (lE - rE) * 0.5;
-
-        // Target position — arranged on a frequency surface
-        // Each band forms a ring at different radius and height
-        float ringR = lerp(0.5, 3.0, bt) * (1.0 + a.stereoWid * 0.2);
-        float ringAng = float(sub) / 3.0 * PI * 2.0 + Time * 0.3 * (0.5 + bt) * a.motSpeed + stereoBal * 0.3 + panMod * 0.4;
-        float ringY = lerp(-1.5, 1.5, bt);
-
-        float3 targetPos = float3(cos(ringAng) * ringR, ringY, sin(ringAng) * ringR);
+        float3 targetPos = emit[n].worldPos;
+        float energy = emit[n].intensity;
+        float gate = emit[n].active * step(0.05, emit[n].intensity);
+        float bt = float(emit[n].bandIdx) / float(SE_N_BANDS - 1);
 
         // Transient — dissolution: scatter particles
-        float dissolve = transient * 2.0;
+        float dissolve = transientAmt * 2.0;
         float3 scatter = float3(
             hash11(float(n) * 7.3 + Time * 10.0) - 0.5,
             hash11(float(n) * 13.7 + Time * 8.0) - 0.5,
@@ -91,14 +69,10 @@ void computeParticles(out Particle particles[N_PARTICLES], float bands[8], float
         finalPos *= (1.0 + envelope * 0.1 * sin(Time * 2.0 + float(n)));
 
         particles[n].pos = finalPos;
-        particles[n].vel = (targetPos - finalPos) * converge;
         particles[n].energy = energy * gate;
         particles[n].gate = gate;
         particles[n].freqFrac = bt;
-
-        float3 c = hsv(a.hueBase + bt * a.hueRange, 0.6 * a.satur, 0.9);
-        c = lerp(c, lerp(a.brainCol, a.brainCol2, bt), 0.3);
-        particles[n].color = c;
+        particles[n].color = emit[n].color;
     }
 }
 
@@ -109,54 +83,78 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target
     float r = length(p);
     float silence = 1.0 - a.isSilent;
 
+    // ── DSP additive ──
     float lufs = lufsNormalized();
     float crest = crestFactorNormalized();
     float thd = thdNormalized();
     float phaseCoh = phaseCoherence();
+    float phaseCorr = phaseCoherence();
 
-    float bands[8] = { a.b0, a.b1, a.b2, a.b3, a.b4, a.b5, a.b6, a.b7 };
-    float dspBands[8] = { DspBand0, DspBand1, DspBand2, DspBand3, DspBand4, DspBand5, DspBand6, DspBand7 };
+    // ── Audio dynamics ──
     float beatPulse = a.beat * a.tempoConf;
     float kickSurge = a.kick * a.kickConf * exp(-a.beatPhase * 3.0);
     float transientAmt = a.transient;
     float envelope = a.envelope;
-    float phrase = phrasePulse(a);
 
+    // ── Camera — VR head pose or desktop inside particle cloud ──
+    SeCamera cam;
+    if (VR_ACTIVE) {
+        cam = seCameraVR();
+    } else {
+        float FOV = 0.75;
+        float camAng = a.section * 0.5 + a.stereoBal * 0.2 + Time * 0.02 * a.motSpeed;
+        float3 camPos = float3(sin(camAng) * 2.0, 0.5 + a.stereoDiff * 0.1, cos(camAng) * 2.0);
+        cam = seCamera(camPos, float3(0, 0, 0), FOV);
+    }
+
+    // ── Spatial encoder: PSYCHOACOUSTIC profile ──
+    SeParams params = seParams(SE_PROFILE_PSYCHOACOUSTIC);
+    params.widthScale = 2.5;
+    params.heightScale = 2.5;
+    params.depthScale = 3.0;
+    params.jitterAmt = 0.12 + thd * 0.2;
+
+    float bands[8] = { a.b0, a.b1, a.b2, a.b3, a.b4, a.b5, a.b6, a.b7 };
+
+    SeEmitter emit[SE_NUM_OBJ];
+    seComputeEmitters(emit, bands, a, cam, params,
+                      lufs, crest, thd, phaseCoh,
+                      beatPulse, kickSurge, transientAmt, envelope);
+
+    // ── World environment ──
+    SeWorld world = seWorld(0.05, float3(0.003, 0.002, 0.01), -1.8, 0.0, 0.0);
+    world.gridIntensity = 0.02;
+    world.ambientLevel = 0.003;
+    world.ambientColor = float3(0.008, 0.006, 0.015);
+    seApplyWorldFog(emit, world);
+
+    // ── Derive particles from emitters ──
     Particle particles[N_PARTICLES];
-    computeParticles(particles, bands, dspBands, kickSurge, beatPulse, a.stereoBal, a.stereoWid,
-                     crest, thd, transientAmt, envelope, a.section, phaseCoh, a);
+    computeParticlesFromEmitters(particles, emit, kickSurge, beatPulse, transientAmt,
+                                 thd, envelope, crest, a);
 
-    // ── Camera — inside the particle cloud ──
-    float FOV = 0.75;
-    float camAng = a.section * 0.5 + a.stereoBal * 0.2 + Time * 0.02 * a.motSpeed;
-    float3 camPos = float3(sin(camAng) * 2.0, 0.5 + a.stereoDiff * 0.1, cos(camAng) * 2.0);
-    float3 camTarget = float3(0, 0, 0);
-    float3 fwd = normalize(camTarget - camPos);
-    float3 right = normalize(cross(fwd, float3(0, 1, 0)));
-    float3 up = cross(right, fwd);
-
-    // ── Background — dark hologram space ──
-    float3 col = float3(0.001, 0.001, 0.004) * silence;
-    col += starfield(uv, a) * 0.005;
+    // ── Background — dark hologram space + world env ──
+    float3 col = seWorldEnvironment(p, cam, world, a, kickSurge, silence);
+    col += starfield(uv, a) * 0.003;
 
     // ── Project particles ──
     float2 scrPos[N_PARTICLES];
     float scrDepth[N_PARTICLES];
 
     [unroll] for (int n = 0; n < N_PARTICLES; n++) {
-        float3 toP = particles[n].pos - camPos;
-        scrDepth[n] = dot(toP, fwd);
+        float3 toP = particles[n].pos - cam.pos;
+        scrDepth[n] = dot(toP, cam.fwd);
         if (scrDepth[n] < 0.1) { scrPos[n] = float2(999, 999); scrDepth[n] = 0.0; continue; }
-        scrPos[n] = float2(dot(toP, right) / (scrDepth[n] * FOV), dot(toP, up) / (scrDepth[n] * FOV));
+        scrPos[n] = float2(dot(toP, cam.right) / (scrDepth[n] * cam.fov),
+                           dot(toP, cam.up) / (scrDepth[n] * cam.fov));
     }
 
     // ── Particle trails — connect to nearest neighbor in same band ──
     [loop] for (int i = 0; i < N_PARTICLES; i++) {
         if (particles[i].gate < 0.01 || scrDepth[i] < 0.1) continue;
 
-        // Connect to next particle in same band (sub+1)
-        int band = i / 3;
-        int nextIdx = (band * 3) + ((i % 3) + 1) % 3;
+        int band = i / (SE_N_SUB * 2);
+        int nextIdx = (band * SE_N_SUB * 2) + ((i % (SE_N_SUB * 2)) + 1) % (SE_N_SUB * 2);
         if (particles[nextIdx].gate < 0.01 || scrDepth[nextIdx] < 0.1) continue;
 
         float2 ab = scrPos[nextIdx] - scrPos[i];
@@ -168,10 +166,10 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target
 
         float3 trailCol = lerp(particles[i].color, particles[nextIdx].color, 0.5);
         float avgDepth = (scrDepth[i] + scrDepth[nextIdx]) * 0.5;
-        float depthFade = exp(-avgDepth * 0.08);
+        float depthFade = exp(-avgDepth * world.fogDensity);
         float trailInt = (particles[i].energy + particles[nextIdx].energy) * 0.5 * (1.0 + lufs * 0.15);
 
-        col += trailCol * trailGlow * trailInt * depthFade * 0.08 * silence;
+        col += trailCol * trailGlow * trailInt * depthFade * 0.06 * silence;
     }
 
     // ── Particles — glowing points with multi-layer glow ──
@@ -186,41 +184,51 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target
         float haloGlow = exp(-scrDist * scrDist / (sz * sz * 5.0));
 
         float intensity = particles[m].energy * (1.0 + lufs * 0.2);
-        float depthFade = exp(-scrDepth[m] * 0.08);
+        float depthFade = exp(-scrDepth[m] * world.fogDensity);
 
-        // Crest focuses particles — sharper cores
         float focus = lerp(0.5, 1.5, crest);
 
-        col += float3(0.9, 0.95, 1.0) * coreGlow * intensity * focus * depthFade * 1.5 * silence;
-        col += particles[m].color * midGlow * intensity * depthFade * 0.7 * silence;
-        col += particles[m].color * haloGlow * intensity * depthFade * 0.15 * silence;
+        col += float3(0.9, 0.95, 1.0) * coreGlow * intensity * focus * depthFade * 0.35 * silence;
+        col += particles[m].color * midGlow * intensity * depthFade * 0.15 * silence;
+        col += particles[m].color * haloGlow * intensity * depthFade * 0.03 * silence;
     }
 
-    // ── Beat — convergence flash ──
-    col += a.brainCol * beatPulse * exp(-a.beatPhase * 4.0) * 0.03 * silence;
+    // ── Emitter glow — depth-aware, VR or desktop ──
+    if (VR_ACTIVE) {
+        float3 headPos = float3(VRHeadPos.xyz);
+        [loop] for (int j = 0; j < SE_NUM_OBJ; j++) {
+            if (emit[j].active < 0.01 || emit[j].depth < 0.1) continue;
+            col += seEmitGlowVR(p, emit[j], world, headPos, silence);
+        }
+    } else {
+        [loop] for (int j = 0; j < SE_NUM_OBJ; j++) {
+            if (emit[j].active < 0.01 || emit[j].depth < 0.1) continue;
+            col += seEmitGlowDepth(p, emit[j], world, lufs, crest, beatPulse,
+                                   a.beatPhase, kickSurge, transientAmt, silence);
+        }
+    }
 
-    // ── Kick — explosion flash ──
-    col += float3(1.0, 0.6, 0.2) * kickSurge * 0.08 * exp(-r * r * 3.0) * silence;
+    // ── L↔R links ──
+    [loop] for (int lb = 0; lb < SE_N_BANDS; lb++) {
+        col += seLinkLR(p, emit, lb, phaseCorr, phaseCoh, silence);
+    }
 
-    // ── Transient — dissolution shimmer ──
+    // ── Listener focal point ──
+    col += seListener(p, cam, a, beatPulse, kickSurge, silence);
+
+    // ── Mode-specific overlays — subtle ──
+    col += a.brainCol * beatPulse * exp(-a.beatPhase * 4.0) * 0.01 * silence;
+    col += float3(1.0, 0.6, 0.2) * kickSurge * 0.02 * exp(-r * r * 3.0) * silence;
     if (transientAmt > 0.02) {
-        float shimmer = transientAmt * hash21(p * 100.0 + Time * 40.0) * 0.04;
+        float shimmer = transientAmt * hash21(p * 100.0 + Time * 40.0) * 0.03;
         col += a.brainCol3 * shimmer * silence;
     }
-
-    // ── Beat ring ──
     float ringDist = abs(r - a.beatPhase * 0.7);
-    col += a.brainCol * exp(-ringDist * ringDist * 40.0) * beatPulse * 0.025 * silence;
-
-    // ── ColorPulse ──
-    col += a.brainCol3 * a.colorPulse * 0.02 * silence;
-
-    // ── Energy + punch ──
-    col += a.brainCol2 * a.energy * 0.015 * silence;
-    col += a.brainCol * a.punch * 0.015 * silence;
-
-    // ── Beat anticipation ──
-    col += a.brainCol * a.beatAnt * 0.01 * exp(-r * 2.0) * silence;
+    col += a.brainCol * exp(-ringDist * ringDist * 40.0) * beatPulse * 0.02 * silence;
+    col += a.brainCol3 * a.colorPulse * 0.015 * silence;
+    col += a.brainCol2 * a.energy * 0.01 * silence;
+    col += a.brainCol * a.punch * 0.01 * silence;
+    col += a.brainCol * a.beatAnt * 0.008 * exp(-r * 2.0) * silence;
 
     // ── Dynamic range ──
     col *= (0.3 + a.gated * 0.7);
@@ -228,9 +236,10 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target
     // ── Standard overlays ──
     col += standardOverlays(p, r, a) * 0.02;
 
-    // ── HDR limiter ──
-    float maxC = max(col.r, max(col.g, col.b));
-    if (maxC > 1.2) col *= 1.2 / maxC;
+        // ── Active-emitter normalization — busy music doesn't stack brighter ──
+    col *= sqrt(16.0 / seActiveCount(emit));
+    // ── Soft tone mapping (Reinhard) — no hard clamp, preserves color ──
+    col = softReinhard(col);
 
     col *= silence;
 

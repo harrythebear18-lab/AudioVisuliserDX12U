@@ -26,7 +26,7 @@ static class Program
 
         var form = new Form
         {
-            Text = "RTX Audio Visualizer — DX12 Ultimate",
+            Text = "RS by Resonance — DX12 Ultimate",
             Width = width,
             Height = height,
             StartPosition = FormStartPosition.CenterScreen,
@@ -41,6 +41,9 @@ static class Program
         DirectorHUD? directorHud = null;
         StageSimWASAPI.LightingBrain? brain = null;
         StageSimWASAPI.MusicBrainAI? musicAI = null;
+        OpenXRManager? xrManager = null;
+        DX12Renderer? dx12Renderer = null;
+        bool vrMode = false;
         float time = 0;
         var stopwatch = System.Diagnostics.Stopwatch.StartNew();
         bool rendererInitialized = false;
@@ -119,6 +122,33 @@ static class Program
                 DebugLogger.Info($"  Work Graphs: {renderer.SupportsWorkGraphs}");
                 DebugLogger.Info($"  Mode: {renderer.CurrentMode}");
                 DebugLogger.Info($"  Auto Mode Selection: ON (LightingBrain)\n");
+
+                // Try to initialize OpenXR for VR headset support
+                if (renderer is DX12Renderer dx12)
+                {
+                    dx12Renderer = dx12;
+                    try
+                    {
+                        xrManager = new OpenXRManager();
+                        if (xrManager.Initialize(dx12.NativeDevice, dx12.NativeCommandQueue))
+                        {
+                            DebugLogger.Info("[OpenXR] VR headset detected and initialized!");
+                            DebugLogger.Info($"[OpenXR] Press V to toggle VR mode");
+                        }
+                        else
+                        {
+                            DebugLogger.Info("[OpenXR] No VR headset detected — desktop mode only");
+                            xrManager.Dispose();
+                            xrManager = null;
+                        }
+                    }
+                    catch (Exception xrEx)
+                    {
+                        DebugLogger.Warn($"[OpenXR] Initialization failed: {xrEx.Message}");
+                        xrManager?.Dispose();
+                        xrManager = null;
+                    }
+                }
 
                 // Populate mode dropdown
                 modeCombo.Items.Clear();
@@ -208,6 +238,30 @@ static class Program
                         else { directorHud.Show(); directorHud.BringToFront(); }
                     }
                     DebugLogger.Info($"Director HUD: {(directorHud.Visible ? "ON" : "OFF")}");
+                    break;
+                case Keys.V:
+                    if (xrManager != null && xrManager.IsInitialized)
+                    {
+                        if (!vrMode)
+                        {
+                            if (xrManager.BeginSession())
+                            {
+                                vrMode = true;
+                                DebugLogger.Info("[OpenXR] VR mode ON — rendering to headset");
+                            }
+                        }
+                        else
+                        {
+                            xrManager.EndSession();
+                            vrMode = false;
+                            renderer?.DisableVR();
+                            DebugLogger.Info("[OpenXR] VR mode OFF — desktop rendering");
+                        }
+                    }
+                    else
+                    {
+                        DebugLogger.Info("[OpenXR] No VR headset available");
+                    }
                     break;
             }
         };
@@ -314,7 +368,65 @@ static class Program
                     rawFrame.LatRenderMs = renderer.RenderLatencyMs;
                     rawFrame.LatTotalPipelineMs += renderer.RenderLatencyMs;
                     renderer.UpdateHUD(rawFrame);
-                    renderer.Render(time);
+
+                    if (vrMode && xrManager != null && xrManager.IsInitialized && dx12Renderer != null)
+                    {
+                        // ── VR render path: OpenXR frame loop ──
+                        xrManager.PollEvents();
+
+                        if (xrManager.IsSessionRunning)
+                        {
+                            // xrWaitFrame gates render thread to headset refresh rate
+                            xrManager.WaitFrame();
+                            xrManager.BeginFrame();
+
+                            if (xrManager.ShouldRender)
+                            {
+                                // Locate views for both eyes at predicted display time
+                                var eyePoses = xrManager.LocateViews();
+
+                                // Render each eye into its swapchain
+                                for (int eye = 0; eye < 2; eye++)
+                                {
+                                    // Update VR constant buffer with this eye's pose
+                                    // Head position is midpoint between eyes; per-eye offset is in the pose
+                                    var headPos = eyePoses[eye].Position;
+                                    var headQuat = eyePoses[eye].Orientation;
+
+                                    // Compute FOV from the eye's frustum angles
+                                    float fov = Math.Max(
+                                        Math.Abs(eyePoses[eye].FovRight - eyePoses[eye].FovLeft),
+                                        Math.Abs(eyePoses[eye].FovUp - eyePoses[eye].FovDown));
+
+                                    dx12Renderer.UpdateVRHeadPose(headPos, headQuat,
+                                        xrManager.IPD, eye, fov);
+
+                                    // Acquire swapchain image
+                                    IntPtr colorTex = xrManager.AcquireColorImage(eye);
+                                    if (colorTex != IntPtr.Zero)
+                                    {
+                                        dx12Renderer.RenderToVRTexture(colorTex,
+                                            xrManager.EyeWidth, xrManager.EyeHeight, time);
+                                        xrManager.ReleaseColorImage(eye);
+                                    }
+                                }
+                            }
+
+                            xrManager.EndFrame();
+                        }
+                        else
+                        {
+                            // Session not running — fell back to desktop
+                            vrMode = false;
+                            renderer.DisableVR();
+                            renderer.Render(time);
+                        }
+                    }
+                    else
+                    {
+                        // ── Desktop render path ──
+                        renderer.Render(time);
+                    }
 
                     directorHud?.UpdateSnapshot(rawFrame, graph, director, ollamaFeedback);
                 }
@@ -333,6 +445,7 @@ static class Program
             ollamaFeedback?.Dispose();
             musicAI?.Dispose();
             directorHud?.Dispose();
+            xrManager?.Dispose();
             renderer?.Dispose();
         };
 

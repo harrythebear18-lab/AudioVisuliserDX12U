@@ -280,37 +280,162 @@ Per DX12U_VISUALIZATION_RULES.md §Visual Quality Standard:
 
 ---
 
-## 7. Implementation Plan
+## 7. Implementation Plan — Full VR-Layer Migration (Modes 30-49)
 
-### Phase 1: World Environment (spatial_encoder.hlsl)
-- Add `SeWorld` struct and `seWorldEnvironment()` function
-- Add depth-resolved glow (`seEmitGlowDepth()`)
-- Add `SE_PROFILE_PSYCHOACOUSTIC` profile
-- Add VR camera helper (`seCameraVR()`)
+### Completed
 
-### Phase 2: Resonance Field (mode 37) Redesign
-- Use PSYCHOACOUSTIC profile
-- Configure world: subtle grid floor, fog density 0.06, dark ambient
-- Camera: listener inside field, slow orbit, FOV 0.6
-- Emitters: Chladni-patterned glow with depth fog
-- Negative space: only active emitters render, gated aggressively
+- [x] **Phase 1**: World Environment (`spatial_encoder.hlsl`) — SeWorld, seEmitGlowDepth, seEmitGlowVR, SE_PROFILE_PSYCHOACOUSTIC, seCameraVR
+- [x] **Phase 2**: OpenXR Integration — OpenXRManager, frame loop, Reversed-Z depth, VR render path
+- [x] **Mode 36** (Cosmic Web) — SPHERICAL profile, filament rendering, depth fog, VR-aware
+- [x] **Mode 37** (Resonance Field) — PSYCHOACOUSTIC profile, Chladni interference, aggressive gating, VR-aware
+- [x] **Branding** — "RS by Resonance" applied to window title + OpenXR app name
+- [x] **Bug fix** — Root parameter shift (VRCB at b3) — all bloom/postfx/tonemap/skia descriptor tables updated to root param 4
 
-### Phase 3: Cosmic Web (mode 36) Migration
-- Migrate from spatial_pipeline.hlsl to spatial_encoder.hlsl
-- Use SPHERICAL profile with world environment
-- Add filament rendering with depth fog
-- Camera: outside looking in at web, FOV 0.5
+### Keepers (No Migration Needed)
 
-### Phase 4: Neural Synapse (mode 38) Migration
-- Migrate from spatial_pipeline.hlsl to spatial_encoder.hlsl
-- Use HEMISPHERE profile with world environment
-- Add synapse links with depth fog
+- **Mode 40** (Quantum Field Interferometer) — user-approved as-is
+- **Mode 49** (Fractal Dimension Explorer) — user-approved as-is
+
+### Remaining Migrations (16 modes)
+
+Each migration follows the same pattern:
+1. Include `spatial_encoder.hlsl` + `layers.hlsl`
+2. Select profile + tune `SeParams`
+3. Set up `SeCamera` — `seCameraVR()` when VR active, desktop orbit fallback
+4. Configure `SeWorld` — fog, grid floor, dark ambient
+5. Call `seComputeEmitters()` for 48 audio-driven 3D positions
+6. Render with `seEmitGlowVR()` / `seEmitGlowDepth()` for depth-aware glow
+7. Add mode-specific visual algorithm (unique phenomenon per mode)
+8. Aggressive negative-space gating + HDR limiter (1.0 cap for VR comfort)
+
+---
+
+#### Batch A: Modes 30-35 (6 modes)
+
+**Mode 30 — Space Plasma Field** (`dx_space_plasma.hlsl`)
+- Profile: `SE_PROFILE_RADIAL` — radial burst from center outward
+- World: fog 0.05, grid floor, dark ambient
+- Camera: inside plasma, FOV 0.7, slow orbit
+- Visual: volumetric plasma rays from emitters, EM field math (curl noise), depth-faded raymarching
+- Negative space: only active plasma rays render, tight gating
+
+**Mode 31 — Gravitational Space Waves** (`dx_gravitational_waves.hlsl`)
+- Profile: `SE_PROFILE_SPHERICAL` — sources on sphere
+- World: fog 0.04, grid floor, dark ambient
+- Camera: outside looking in, FOV 0.5
+- Visual: GW strain tensor fabric — grid mesh deformed by emitter waves, expanding ripples
+- Negative space: fabric only visible where strain is significant
+
+**Mode 32 — Fluid Dynamics** (`dx_fluid_dynamics.hlsl`)
+- Profile: `SE_PROFILE_PSYCHOACOUSTIC` — perceptual placement
+- World: fog 0.06, grid floor, dark ambient
+- Camera: inside fluid volume, FOV 0.65
+- Visual: Navier-Stokes volumetric fluid — emitter positions drive velocity field, raymarched density
+- Negative space: sparse fluid, only where energy is high
+
+**Mode 33 — Lightning Storm** (`dx_lightning_storm.hlsl`)
+- Profile: `SE_PROFILE_SPHERICAL` — sources in sphere
+- World: fog 0.05, grid floor, dark ambient
+- Camera: inside storm, FOV 0.7
+- Visual: dielectric breakdown arcs between emitters, branching lightning, depth-faded
+- Negative space: dark storm clouds, only arcs visible
+
+**Mode 34 — Neon Cityscape** (`dx_neon_cityscape.hlsl`)
+- Profile: `SE_PROFILE_TUNNEL` — corridor depth, walls left/right
+- World: fog 0.08 (thick), grid floor as road, dark ambient
+- Camera: flythrough corridor, FOV 0.6
+- Visual: synthwave skyline — emitters become neon buildings, reflections on floor grid
+- Negative space: dark sky between buildings
+
+**Mode 35 — Spatial Audio Sonar** (`dx_spectrum_waterfall.hlsl`)
+- Profile: `SE_PROFILE_RADIAL` — 360° sonar
+- World: fog 0.04, grid floor as water surface, dark ambient
+- Camera: above looking down at 45°, FOV 0.5
+- Visual: 360° sonar display — emitter ripples expand outward on water surface, depth-faded
+- Negative space: dark water between sonar rings
+
+---
+
+#### Batch B: Modes 38-39 (2 modes)
+
+**Mode 38 — Neural Synapse Storm** (`dx_neural_synapse.hlsl`)
+- Profile: `SE_PROFILE_HEMISPHERE` — L/R brain hemispheres
+- World: fog 0.05, grid floor, dark ambient
 - Camera: inside brain, FOV 0.7
+- Visual: synapse links between emitters with signal pulses, firing neurons, depth-faded axons
+- Negative space: only active synapses render, aggressive gating
 
-### Phase 5: Future Modes
-- Each new mode selects profile + world config
-- Modes can request new profiles as needed (extensible)
-- World environment parameters tune per mode concept
+**Mode 39 — Acoustic Hologram Projector** (`dx_hologram_projector.hlsl`)
+- Profile: `SE_PROFILE_WAVE_FIELD` — flat field projection
+- World: fog 0.04, hologram table grid, dark ambient
+- Camera: looking down at hologram table, FOV 0.55
+- Visual: volumetric hologram — emitters project interference patterns on table surface, scan lines
+- Negative space: dark room, only hologram projection visible
+
+---
+
+#### Batch C: Modes 41-45 (5 modes)
+
+**Mode 41 — Spectral Aurora Cathedral** (`dx_aurora_cathedral.hlsl`)
+- Profile: `SE_PROFILE_PSYCHOACOUSTIC` — perceptual placement
+- World: fog 0.06, grid floor, dark ambient
+- Camera: inside cathedral, FOV 0.65
+- Visual: volumetric aurora curtains — emitters drive curtain wave deformation, depth-faded raymarching
+- Negative space: dark cathedral interior, only aurora curtains visible
+
+**Mode 42 — Gravitational Lens Observatory** (`dx_gravitational_lens.hlsl`)
+- Profile: `SE_PROFILE_SPHERICAL` — sources orbit black hole
+- World: fog 0.07, grid floor, dark ambient
+- Camera: outside observatory, FOV 0.5
+- Visual: black hole + accretion disk — emitters lensed around central mass, photon ring, depth-faded
+- Negative space: dark space, only lensed light visible
+
+**Mode 43 — Phonon Crystal Lattice** (`dx_phonon_crystal.hlsl`)
+- Profile: `SE_PROFILE_SPHERICAL` — crystal lattice positions
+- World: fog 0.04, grid floor, dark ambient
+- Camera: inside crystal, FOV 0.6
+- Visual: 3D phononic crystal — wave propagation through lattice, emitter positions are lattice nodes
+- Negative space: only active wave propagation visible
+
+**Mode 44 — Cymatic Resonance Chamber** (`dx_cymatic_chamber.hlsl`)
+- Profile: `SE_PROFILE_PSYCHOACOUSTIC` — perceptual placement
+- World: fog 0.05, grid floor as chamber floor, dark ambient
+- Camera: inside chamber, FOV 0.65
+- Visual: 3D Chladni patterns — standing wave nodes/antinodes from emitter positions, depth-faded
+- Negative space: only resonance patterns visible, dark chamber
+
+**Mode 45 — Sonic Topology Mapper** (`dx_sonic_topology.hlsl`)
+- Profile: `SE_PROFILE_TUNNEL` — corridor depth
+- World: fog 0.06, grid floor, dark ambient
+- Camera: flythrough manifold, FOV 0.6
+- Visual: 4D topological manifold — emitter positions deform manifold surface, depth-faded projection
+- Negative space: only manifold surface where curvature is high
+
+---
+
+#### Batch D: Modes 46-48 (3 modes)
+
+**Mode 46 — Acoustic Particle Hologram** (`dx_particle_hologram.hlsl`)
+- Profile: `SE_PROFILE_PSYCHOACOUSTIC` — perceptual placement
+- World: fog 0.05, grid floor, dark ambient
+- Camera: inside particle cloud, FOV 0.7
+- Visual: GPU particles forming 3D shapes — emitters are particle attractors, depth-faded point sprites
+- Negative space: only active particle clusters visible
+
+**Mode 47 — Sonic Sphereworld** (`dx_freq_nebula.hlsl`)
+- Profile: `SE_PROFILE_SPHERICAL` — planet surface distribution
+- World: fog 0.08 (thick atmosphere), grid floor, dark ambient
+- Camera: orbiting planet, FOV 0.5
+- Visual: SDF planet with audio terrain — emitters drive surface displacement, atmosphere, meteors
+- Negative space: dark space around planet
+
+**Mode 48 — Spatiotemporal Wave Field** (`dx_wave_field.hlsl`)
+- Currently uses old `spatial_pipeline.hlsl` — needs migration to `spatial_encoder.hlsl`
+- Profile: `SE_PROFILE_WAVE_FIELD` — flat field (same concept, new pipeline)
+- World: fog 0.04, grid floor + wall, dark ambient
+- Camera: elevated orbit, FOV 0.75
+- Visual: 3D wave equation with audio sources — same as current but with depth fog + VR support
+- Negative space: minimal — this is a gold standard mode, keep clean composition
 
 ---
 
@@ -333,3 +458,396 @@ This architecture is designed to be extended:
 - **Per-pixel cost**: Max 3 exp() calls per emitter in glow, early distance cull
 - **World environment**: Single pass, no per-emitter cost
 - **Links**: L↔R only (8 links max), culled by distance
+
+---
+
+## 10. Psychoacoustic Differentiation — Why This Isn't Another "3D Spectrum Analyzer"
+
+### The Problem with Standard "3D Audio Visualizers"
+
+Almost everyone tackling "3D audio visualizers" or "VR spectrums" is doing simple, naive visual tricks — taking a standard 2D FFT, turning it into a 3D bar chart or a particle sphere, and panning stereo audio into binaural HRTF.
+
+They treat the graphics as 3D, but the audio mathematical model feeding it is still basic 2D stereo spectral analysis.
+
+### What This System Does Differently
+
+Mapping true 3D spatial audio into 3D stereo psychoacoustics is fundamentally different because it actually models human perceptual hearing:
+
+#### 10.1 Beyond Basic FFT — Psychoacoustic Modeling
+
+**Standard Visualizers**: Slap an FFT over the left/right channels. They completely ignore interaural time differences, head shadowing, or pinna reflections.
+
+**This Model**: Ingests raw multichannel or Ambisonic/object-based streams, decoding the ITD (Interaural Time Difference), ILD (Interaural Level Difference), and HRTF phase shifts dynamically. The visual output doesn't just show "loudness at 1kHz"; it shows the exact spatial coordinate where the listener's brain perceives the sound originating in 3D space.
+
+The spatial encoder (`spatial_encoder.hlsl`) with `SE_PROFILE_PSYCHOACOUSTIC` already implements:
+- Azimuth from stereo balance (HRTF-inspired horizontal plane positioning)
+- Elevation from band frequency (bass = low/foundation, treble = high/air)
+- Distance from energy (loud = close, quiet = far)
+- Phase coherence as L/R hemisphere synchronization metric
+
+#### 10.2 Visualizing Phase Vectors & Volumetric Energy
+
+Instead of mapping frequencies to arbitrary 3D geometry, true psychoacoustic spatial visualization routes binaural phase cancellation and cross-correlation vectors directly into pixel/compute shaders.
+
+This system can visually render psychoacoustic phenomena as volumetric physical density in VR:
+- **Precedence effect (Haas effect)**: First-arrival wavefronts render brighter/earlier, delayed reflections render as dimmer trailing copies
+- **Phase decorrelation**: Low phase coherence → emitters spread apart (diffuse field). High coherence → emitters converge (localized source)
+- **Acoustic distance cues**: High-frequency air absorption (far sources lose high-band energy → visual desaturation). Direct-to-reverberant ratio (dry = sharp cores, wet = diffuse halos)
+- **ILD/ITD vectors**: Stereo difference maps to horizontal displacement. The brain's lateralization is visualized as physical left-right position
+
+The shaders already use `phaseCoh` to drive:
+- L↔R link strength (coherent sources pull together)
+- Color channel swapping (`gridCol.gbr` at low coherence — field asymmetry)
+- Hemisphere divider glow (synchronization indicator in neural_synapse)
+
+#### 10.3 High-Frequency Real-Time Performance
+
+Computing HRTF psychoacoustic matrices, Ambisonic decoding, and lock-free spatial vector extraction in real time normally chokes standard game engines.
+
+Doing this through Resonance DSP — running custom C# lock-free pipelines with DirectX 12 hardware acceleration — is precisely why this system can handle the mathematical overhead required for true 3D spatial psychoacoustics while keeping VR frame rates locked at 90/120Hz.
+
+Key performance enablers:
+- **Lock-free audio pipeline**: C# `AudioBridge` + `AudioPipeline` process audio without blocking render thread
+- **DX12U hardware acceleration**: Shader Model 6.6 via DXC, HDR R16G16B16A16_Float render targets
+- **Aggressive culling**: Screen-space distance cull before 3D distance, pixel-space cull before expensive ops
+- **Reduced emitter counts**: 16 sources (8 bands × 2 sides) instead of 48 where possible — O(16²) vs O(48²)
+- **No texture fetches in mode shaders**: All spectrum sampling done in shared includes, not per-pixel
+
+Most developers don't attempt this because it requires being simultaneously fluent in bare-metal DSP, psychoacoustic signal processing, low-level HLSL shaders, and spatial computing pipelines. This tool actually shows how the human brain interprets sound in physical space, rather than just making shapes bounce to an EQ.
+
+---
+
+## 11. OpenXR Integration — True VR Headset Support
+
+### 11.1 Architecture
+
+OpenXR provides the VR runtime layer between the application and the headset hardware. It integrates with the existing DX12U renderer via the `XR_KHR_D3D12_enable` extension, which allows passing the existing `ID3D12Device` directly to OpenXR — no separate graphics context needed.
+
+```
+AudioPipeline (C# lock-free) → AudioBridge → DX12Renderer
+                                                ↓
+                                         OpenXR Manager
+                                                ↓
+                                    XR_KHR_D3D12_enable
+                                                ↓
+                                     Headset Swapchain
+                                   (L eye / R eye textures)
+```
+
+### 11.2 What Changes
+
+| Component | Monitor Mode | VR Mode (OpenXR) |
+|---|---|---|
+| Swapchain | DXGI flip-model to window | OpenXR per-eye swapchain textures |
+| Camera | Section-driven orbit, computed `camPos`/`camAng` | Head pose from `XrView` — actual head position/orientation |
+| Render passes | 1 (fullscreen quad) | 2 (left eye + right eye) |
+| Shaders | Unchanged | Unchanged — same HLSL, same audio CB |
+| Audio pipeline | Unchanged | Unchanged |
+| Bloom/tonemap | Shared pipeline | Shared pipeline (applied per-eye) |
+| Frame timing | VSync / ~60fps | `xrWaitFrame` / 90-120fps |
+
+### 11.3 What Stays the Same
+
+- **All HLSL shaders** — they already take UV + audio data via constant buffers
+- **PSO creation, root signatures, descriptor heaps** — unchanged
+- **Audio pipeline** — `AudioBridge`, `AudioPipeline`, `LightingBrain` all work as-is
+- **Bloom pipeline** — applied to each eye's render target
+
+### 11.4 Head Pose → Psychoacoustic Pipeline
+
+The critical integration: OpenXR head pose feeds into the psychoacoustic spatial encoder, creating a closed loop between where the listener looks and where sounds appear to originate.
+
+```csharp
+// Each frame:
+// 1. xrWaitFrame — get predicted display time
+// 2. xrLocateViews — get head pose + eye poses
+// 3. Inject head position/orientation into shader camera
+// 4. Render left eye → OpenXR swapchain texture
+// 5. Render right eye → OpenXR swapchain texture
+// 6. xrEndFrame — submit to headset
+```
+
+The head pose replaces the computed `camPos`/`camAng` in shaders:
+- **Head position** → `camPos` (listener is literally inside the sound field)
+- **Head orientation** → `fwd`/`right`/`up` vectors (look around the sound field)
+- **IPD** (inter-pupillary distance) → small horizontal offset between L/R eye cameras
+- **Eye tracking** (if available) → focal point follows gaze direction
+
+This creates true psychoacoustic VR: when the listener turns their head, the visualized sound sources stay fixed in world space (externalized), exactly as real sound sources behave. The brain's spatial hearing model is visualized in the place where it actually perceives sound.
+
+### 11.5 Implementation Components
+
+1. **`OpenXRManager.cs`** (~200 lines)
+   - `xrCreateInstance` with D3D12 graphics binding
+   - Session creation + swapchain configuration
+   - Per-frame: `xrWaitFrame` → `xrBeginFrame` → `xrLocateViews` → `xrEndFrame`
+   - Eye swapchain texture acquisition/release
+
+2. **`DX12Renderer` render loop adaptation** (~150 lines)
+   - Detect VR mode (headset connected)
+   - Render to OpenXR swapchain textures instead of DXGI swapchain
+   - Per-eye camera offset from head pose
+   - Fallback to monitor mode if no headset
+
+3. **Shader camera injection** (~50 lines)
+   - New constant buffer field: `float4x4 headPose` (position + orientation)
+   - Shaders use head pose when present, fall back to computed camera when not
+   - IPD offset applied per-eye
+
+4. **NuGet package**: `OpenXR.NET` or P/Invoke the native OpenXR loader
+
+### 11.6 VR Performance Constraints
+
+VR doubles GPU load (2 eye renders per frame). The latency fixes already applied are critical:
+
+| Optimization | Before | After | Impact |
+|---|---|---|---|
+| Neural synapse emitters | 48 (O(48²)=2304) | 16 (O(16²)=256) | 9× faster |
+| Resonance field sources | 48 (2 passes) | 16 (2 passes) | 3× faster |
+| Hologram grid points | 121 (11×11) | 49 (7×7) | 2.5× faster |
+| Aurora raymarch steps | 24 | 16 | 1.5× faster |
+| Camera spin removed | Time-based orbit | Section-only | No per-frame camera recompute |
+
+**VR target**: 90fps = 11.1ms frame budget. With 2 eye renders, each eye must complete in ~5.5ms. The 16-source architecture makes this achievable.
+
+### 11.7 VR Spatial Design Implications
+
+With true head tracking, the VR comfort rules in §2.4 become physically enforced:
+- **No strobing**: Headset users are more sensitive to flicker — beat flashes must be subtle
+- **Stable horizon**: Head pose provides the horizon naturally — no computed camera roll
+- **No rapid camera motion**: The only camera motion is the user's head — section-driven orbit is disabled in VR mode
+- **Focal point**: With eye tracking, the focal point can follow gaze — emitters near gaze direction get sharper
+- **Negative space**: VR FOV is wider — need more negative space to avoid sensory overload
+- **Externalized sources**: Sound sources must stay fixed in world space (not screen-locked) — this is the psychoacoustic promise
+
+---
+
+## 12. Technical Implementation Details
+
+### 12.1 Core Architectural Strengths
+
+**Psychoacoustics vs. Naive "3D Spectrums"**: Most "3D visualizers" simply map an FFT to a 3D grid, keeping the audio processing strictly 2D. This system is different:
+
+- **Perceptual Lateralization**: Mapping ITD/ILD into azimuth and frequency into elevation aligns directly with how the human auditory cortex builds spatial soundstage models (e.g., blue-notes/air frequencies elevated, heavy bass anchored at the foundation).
+- **Distance Decay & Air Absorption**: Distance attenuation through exponential fog and HF desaturation accurately mirrors real-world sound propagation (1/d² loss, atmospheric high-frequency damping).
+
+**Low-Overhead Native OpenXR Pipeline**:
+- Passing the existing `ID3D12Device` via `XR_KHR_D3D12_enable` avoids duplicating graphics contexts or incurring inter-op copy overhead.
+- Rendering directly into OpenXR swapchain textures via left/right eye viewport passes keeps frame delivery strictly deterministic.
+- Decoupling the `LightingBrain` and C# lock-free ring buffers means audio ingestion isn't tied to the VR frame scheduler (`xrWaitFrame`), protecting the DSP loop from headset frame drops.
+
+### 12.2 The 16-Source Optimization vs. Spatial Aliasing
+
+Reducing spatial sources from 48 down to 16 per pass (8 frequency bands × L/R) drops spatial link complexity from O(48²) = 2304 down to O(16²) = 256 operations — a 9× performance win.
+
+To prevent frequency band clustering (where adjacent bands overlap visually and lose individual identity):
+
+```hlsl
+// Enforce minimum spatial separation between adjacent frequency bands
+float bandSpread = (float)bandIdx / 8.0f;
+azimuth += sign(stereoBal) * pow(bandSpread, 1.2f) * MAX_AZIMUTH_SPREAD;
+```
+
+### 12.3 Depth Reprojection & Headset Hologram Stability
+
+To ensure smooth visuals during rapid head movement on modern HMDs (Quest Link, SteamVR, HoloLens 2), include the depth buffer in the OpenXR frame submission:
+
+- Use `XR_KHR_composition_layer_depth` during `xrEndFrame`.
+- **Reversed-Z Depth**: If using Reversed-Z (near=1.0, far=0.0) in the DX12 pipeline for precision, make sure the `XrCompositionLayerDepthInfoKHR` struct reflects `minDepth = 1.0f` and `maxDepth = 0.0f` to prevent reprojection warps.
+
+### 12.4 OpenXR Binding in C# (OpenXR.NET / Native P/Invoke)
+
+When initializing `XrGraphicsBindingD3D12KHR`, pass the existing Direct3D 12 device pointer directly:
+
+```csharp
+// Struct setup for OpenXR D3D12 Binding
+var graphicsBinding = new XrGraphicsBindingD3D12KHR
+{
+    type = XrStructureType.XR_TYPE_GRAPHICS_BINDING_D3D12_KHR,
+    device = pD3D12Device,       // Native ID3D12Device pointer from your renderer
+    queue = pD3D12CommandQueue   // Direct execution queue
+};
+```
+
+### 12.5 VR-Specific Shader Glow Function
+
+Depth-aware spatial emitter glow for VR comfort — adds atmospheric perspective, early culling, perspective-guarded sizing, and far-field desaturation:
+
+```hlsl
+// Depth-Aware Spatial Emitter Glow for VR Comfort
+float3 seEmitGlowVR(
+    float2 uv,
+    SeEmitter e,
+    SeWorld world,
+    float3 headPos,
+    float silence
+) {
+    // 1. Distance Extinction & Atmospheric Perspective
+    float distToHead = length(e.pos - headPos);
+    float depthFog = exp(-distToHead * world.fogDensity);
+
+    // 2. Early Screen & Pixel Culling
+    if (depthFog < 0.01f || silence > 0.95f) return float3(0, 0, 0);
+
+    // 3. Size Scale with Reversed Perspective Guard
+    float perspectiveScale = 1.0f / max(distToHead * 0.35f, 0.2f);
+    float finalSize = e.size * perspectiveScale;
+
+    // 4. Core/Halo Softening for VR Comfort
+    float d = length(uv - e.screenPos);
+    float core = exp(-d * d * (12.0f / finalSize));
+    float halo = exp(-d * (3.0f / finalSize)) * 0.3f;
+
+    // 5. Far-field Desaturation & Color Output
+    float3 desatColor = lerp(luminance(e.color).rrr, e.color, depthFog);
+    float3 finalGlow = (core + halo) * desatColor * e.energy * depthFog;
+
+    return finalGlow;
+}
+```
+
+Key differences from monitor-mode `seEmitGlow`:
+- **Distance from head** (not camera) — uses `headPos` from OpenXR pose
+- **Early cull on depthFog** — skip pixels where emitter is too far to matter
+- **Perspective guard** — `max(distToHead * 0.35f, 0.2f)` prevents divide-by-zero on near emitters
+- **Far-field desaturation** — `lerp(luminance, color, depthFog)` mimics atmospheric HF absorption
+- **Softer halo** — wider, dimmer halo for VR comfort (no harsh edges at periphery)
+
+---
+
+## 13. Execution Readiness
+
+The transition from standard monitor visualization to an immersive spatial environment is logically structured:
+
+### Phase 1: Spatial Encoder Update (`spatial_encoder.hlsl`) — DONE
+- [x] Integrate the `SeWorld` environment layer (fog, grid, ambient)
+- [x] Add depth-resolved glow (`seEmitGlowVR`) with head pose parameter
+- [x] Add `SE_PROFILE_PSYCHOACOUSTIC` layout with band spread anti-clustering
+- [x] Add VR camera helper that accepts OpenXR head pose
+
+### Phase 2: OpenXR Manager Integration — DONE
+- [x] Bind native ID3D12Device via `XR_KHR_D3D12_enable`
+- [x] Set up dual swapchain loop (xrWaitFrame → xrLocateViews → Render L/R)
+- [x] Inject head pose & IPD offsets into shader camera constants
+- [x] Hook `XR_KHR_composition_layer_depth` with Reversed-Z (minDepth=1.0, maxDepth=0.0)
+- [x] Atomic audio/brain snapshot at xrBeginFrame (thread decoupling)
+- [x] Fix root parameter shift (VRCB at b3 → all descriptor tables updated to param 4)
+
+### Phase 3: Mode Migration (16 of 20 modes) — IN PROGRESS
+- [x] Mode 36 (Cosmic Web) → SPHERICAL profile + world environment
+- [x] Mode 37 (Resonance Field) → PSYCHOACOUSTIC profile + Chladni interference
+- [ ] Mode 30 (Space Plasma) → RADIAL profile + volumetric plasma
+- [ ] Mode 31 (Gravitational Waves) → SPHERICAL profile + strain tensor fabric
+- [ ] Mode 32 (Fluid Dynamics) → PSYCHOACOUSTIC profile + Navier-Stokes fluid
+- [ ] Mode 33 (Lightning Storm) → SPHERICAL profile + dielectric breakdown arcs
+- [ ] Mode 34 (Neon Cityscape) → TUNNEL profile + synthwave skyline
+- [ ] Mode 35 (Spatial Sonar) → RADIAL profile + 360° sonar
+- [ ] Mode 38 (Neural Synapse) → HEMISPHERE profile + synapse links
+- [ ] Mode 39 (Hologram Projector) → WAVE_FIELD profile + hologram table
+- [ ] Mode 41 (Aurora Cathedral) → PSYCHOACOUSTIC profile + aurora curtains
+- [ ] Mode 42 (Gravitational Lens) → SPHERICAL profile + black hole lensing
+- [ ] Mode 43 (Phonon Crystal) → SPHERICAL profile + lattice wave propagation
+- [ ] Mode 44 (Cymatic Chamber) → PSYCHOACOUSTIC profile + 3D Chladni
+- [ ] Mode 45 (Sonic Topology) → TUNNEL profile + manifold deformation
+- [ ] Mode 46 (Particle Hologram) → PSYCHOACOUSTIC profile + particle clusters
+- [ ] Mode 47 (Sonic Sphereworld) → SPHERICAL profile + SDF planet
+- [ ] Mode 48 (Wave Field) → Migrate from spatial_pipeline to spatial_encoder
+- Keepers (no migration): Mode 40 (Quantum Interferometer), Mode 49 (Fractal Explorer)
+- Validate HDR limiter (1.0 cap for VR) across all modes
+
+### Phase 4: VR Comfort Validation
+- Verify 90fps target with 48-source architecture (5.5ms per eye)
+- Test on Quest Link, SteamVR, and Windows Mixed Reality
+- Validate no strobing, stable horizon, externalized sources
+- Confirm audio pipeline independence from VR frame scheduler
+
+This design cleanly unifies low-latency audio processing with modern, high-performance spatial graphics.
+
+---
+
+## 14. Technical Refinements
+
+### 14.1 Depth Precision & Reversed-Z Reprojection
+
+In §12.3, depth is passed to `XR_KHR_composition_layer_depth`. Because the pipeline uses a Reversed-Z buffer (near = 1.0, far = 0.0) in DX12 to preserve floating-point precision across spatial fields:
+
+- `XrCompositionLayerDepthInfoKHR.minDepth` must be explicitly set to `1.0f` and `maxDepth` to `0.0f`.
+- Modern runtimes (Oculus/Meta Link, SteamVR, WMR) handle swapped min/max depth bounds correctly for late stage reprojection (LSR/ASW), but omitting this causes severe geometry warping when looking around fast-moving near-field emitters.
+
+### 14.2 Non-Linear Elevation Scaling for Mid-Range Separation
+
+The band spread anti-clustering formula in §12.2 ensures clear separation along the azimuth. For elevation mapping, a non-linear power curve preserves mid-range separation:
+
+```hlsl
+// Non-linear elevation scaling to preserve mid-range separation
+float elevationNorm = pow((float)bandIdx / 7.0f, 0.85f);
+```
+
+The human ear resolves high-frequency elevation through pinna cues (which are subtle over stereo/binaural). Expanding the visual elevation gap around the 1kHz–4kHz presence range prevents mids from visual crowding near the equator. The `0.85` exponent compresses high-band elevation slightly while expanding the mid-range, giving bands 2–5 more vertical breathing room.
+
+### 14.3 OpenXR Frame Scheduler & Thread Decoupling
+
+With `xrWaitFrame` driving the VR render thread, the renderer's timing is gated by the headset display refresh rate (e.g., 90Hz).
+
+Since the lock-free C# `AudioPipeline` ring buffers run asynchronously at audio clock rate (typically 44.1/48kHz or ~100–200Hz updates for DSP features), `LightingBrain` state must be sampled using atomic/lock-free reads right at the start of `xrBeginFrame`:
+
+```csharp
+// At xrBeginFrame — snapshot audio state atomically
+var audioSnapshot = AudioPipeline.Snapshot(); // lock-free read
+var brainSnapshot = LightingBrain.Snapshot();  // lock-free read
+
+// Render both eyes using the same snapshot — guarantees temporal consistency
+RenderEye(eyeLeft,  audioSnapshot, brainSnapshot, headPoseLeft);
+RenderEye(eyeRight, audioSnapshot, brainSnapshot, headPoseRight);
+```
+
+This prevents any audio thread stalls if the VR runtime throttles or drops a frame during heavy GPU load. The audio pipeline continues at its own cadence; the render thread simply reads the latest available snapshot at frame start.
+
+---
+
+## 15. Implementation Roadmap Checklist
+
+```
+[Phase 1: Spatial Encoder Update] — DONE
+  ├── Add SeWorld struct & environment pass (grid floor, fog, ambient)
+  ├── Implement seEmitGlowVR() with head-relative depth & far desaturation
+  ├── Add SE_PROFILE_PSYCHOACOUSTIC profile with band spread anti-clustering
+  ├── Add non-linear elevation scaling (pow 0.85) for mid-range separation
+  └── Add VR camera pose override in HLSL constant buffers
+
+[Phase 2: OpenXR Core Integration] — DONE
+  ├── Bind native ID3D12Device via XR_KHR_D3D12_enable
+  ├── Set up dual swapchain loop (xrWaitFrame → xrLocateViews → Render L/R)
+  ├── Inject head pose & IPD offsets into shader camera constants
+  ├── Hook XR_KHR_composition_layer_depth with Reversed-Z (minDepth=1.0, maxDepth=0.0)
+  ├── Atomic audio/brain snapshot at xrBeginFrame (thread decoupling)
+  └── Fix root parameter shift (VRCB at b3, descriptor tables at param 4)
+
+[Phase 3: Mode Migration (16 of 20 modes)] — IN PROGRESS
+  ├── [x] Mode 36 (Cosmic Web) → SPHERICAL + filaments + depth fog
+  ├── [x] Mode 37 (Resonance Field) → PSYCHOACOUSTIC + Chladni interference
+  ├── [ ] Mode 30 (Space Plasma) → RADIAL + volumetric plasma
+  ├── [ ] Mode 31 (Gravitational Waves) → SPHERICAL + strain tensor fabric
+  ├── [ ] Mode 32 (Fluid Dynamics) → PSYCHOACOUSTIC + Navier-Stokes fluid
+  ├── [ ] Mode 33 (Lightning Storm) → SPHERICAL + dielectric breakdown arcs
+  ├── [ ] Mode 34 (Neon Cityscape) → TUNNEL + synthwave skyline
+  ├── [ ] Mode 35 (Spatial Sonar) → RADIAL + 360° sonar
+  ├── [ ] Mode 38 (Neural Synapse) → HEMISPHERE + synapse links
+  ├── [ ] Mode 39 (Hologram Projector) → WAVE_FIELD + hologram table
+  ├── [ ] Mode 41 (Aurora Cathedral) → PSYCHOACOUSTIC + aurora curtains
+  ├── [ ] Mode 42 (Gravitational Lens) → SPHERICAL + black hole lensing
+  ├── [ ] Mode 43 (Phonon Crystal) → SPHERICAL + lattice wave propagation
+  ├── [ ] Mode 44 (Cymatic Chamber) → PSYCHOACOUSTIC + 3D Chladni
+  ├── [ ] Mode 45 (Sonic Topology) → TUNNEL + manifold deformation
+  ├── [ ] Mode 46 (Particle Hologram) → PSYCHOACOUSTIC + particle clusters
+  ├── [ ] Mode 47 (Sonic Sphereworld) → SPHERICAL + SDF planet
+  ├── [ ] Mode 48 (Wave Field) → Migrate spatial_pipeline → spatial_encoder
+  ├── Keepers: Mode 40 (Quantum Interferometer), Mode 49 (Fractal Explorer)
+  └── Validate HDR limiter (1.0 cap for VR) across all modes
+
+[Phase 4: Comfort & Performance Profiling]
+  ├── Target: ≤ 5.5ms per eye frame time (11.1ms total for 90Hz)
+  ├── Verify externalized sources (sources stay fixed in world space)
+  ├── Confirm zero full-screen strobing or unanchored camera rotation
+  └── Test on Quest Link, SteamVR, WMR for LSR/ASW stability
+```

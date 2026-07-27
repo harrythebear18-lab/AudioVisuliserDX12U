@@ -64,6 +64,15 @@ public interface IRenderer : IDisposable
 
     /// <summary>Render one frame at the given absolute time.</summary>
     void Render(float time);
+
+    /// <summary>Update VR head pose from OpenXR. Call per-eye before Render().</summary>
+    void UpdateVRHeadPose(Vector3 headPos, Quaternion headQuat, float ipd, int eyeIndex, float fov);
+
+    /// <summary>Disable VR mode — shaders fall back to computed camera.</summary>
+    void DisableVR();
+
+    /// <summary>Whether VR mode is currently active.</summary>
+    bool VRActive { get; }
 }
 
 /// <summary>

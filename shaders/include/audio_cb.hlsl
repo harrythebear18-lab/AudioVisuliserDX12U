@@ -62,6 +62,15 @@ cbuffer TimeCB : register(b1)
     float2 RenderResolution;
 };
 
+// VR head pose constant buffer — populated by OpenXR when headset is active
+// When vrActive = 0, shaders fall back to computed camera
+cbuffer VRCB : register(b3)
+{
+    float4 VRHeadPos;      // xyz = head position in world space, w = vrActive (1.0 = VR mode)
+    float4 VRHeadQuat;     // xyzw = head orientation quaternion
+    float4 VREyeInfo;      // x = IPD (inter-pupillary distance), y = eye index (0=left, 1=right), z = fov, w = near plane
+};
+
 Texture2D<float4> u_spectrum : register(t0);
 SamplerState u_sampler : register(s0);
 
@@ -243,5 +252,25 @@ float2 screenToAspect(float2 uv) {
 #define Width RenderResolution.x
 #define Height RenderResolution.y
 #define Aspect (RenderResolution.x / RenderResolution.y)
+
+// VR helpers
+#define VR_ACTIVE (VRHeadPos.w > 0.5)
+#define VR_IPD (VREyeInfo.x)
+#define VR_EYE_INDEX (VREyeInfo.y)
+#define VR_FOV (VREyeInfo.z)
+
+// Convert head quaternion to forward/right/up vectors
+void vrHeadBasis(out float3 fwd, out float3 right, out float3 up) {
+    float4 q = VRHeadQuat;
+    float qx = q.x, qy = q.y, qz = q.z, qw = q.w;
+    // Quaternion to rotation matrix
+    float3 col0 = float3(1.0 - 2.0*(qy*qy + qz*qz), 2.0*(qx*qy + qz*qw), 2.0*(qx*qz - qy*qw));
+    float3 col1 = float3(2.0*(qx*qy - qz*qw), 1.0 - 2.0*(qx*qx + qz*qz), 2.0*(qy*qz + qx*qw));
+    float3 col2 = float3(2.0*(qx*qz + qy*qw), 2.0*(qy*qz - qx*qw), 1.0 - 2.0*(qx*qx + qy*qy));
+    // Forward = -Z (col2 negated for left-handed), Right = +X, Up = +Y
+    fwd = float3(-col2.x, -col2.y, -col2.z);
+    right = col0;
+    up = col1;
+}
 
 #endif // AUDIO_CB_INCLUDED

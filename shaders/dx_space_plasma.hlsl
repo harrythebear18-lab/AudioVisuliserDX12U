@@ -1,152 +1,115 @@
-// Mode 31: Space Plasma Field — volumetric plasma torus with EM field math
-// Lorentz force F = q(E + v×B), cyclotron motion, synchrotron emission.
-// 24 charged particles (3 per band) orbit toroidal field lines.
-// Bass = containment pressure/pinch, mids = magnetic field strength/cyclotron,
-// highs = turbulence/synchrotron emission. Beat = magnetic reconnection.
-// Kick = containment collapse. Transient = particle scatter.
-// DSP: LUFS→emission, crest→field sharpness, THD→turbulence, phase→coherence.
+// RS by Resonance — RapidSpectrum Visualizer
+// HUD Mode 30: Auditory Soundfield Localization — visualizing stereo spatial perception
+// VR Layer mode. Uses spatial_encoder.hlsl with SE_PROFILE_RADIAL.
+//
+// Psychoacoustic phenomenon: The brain builds a spatial soundstage from two ear signals
+// using interaural level differences (ILD), interaural time differences (ITD), and
+// spectral cues. This mode makes that localization process visible:
+//
+//   Direct Sources     → emitter glow at psychoacoustic radial positions
+//   ILD Vectors        → visible beams L→R per band, width = level difference
+//   ITD Wavefronts     → expanding rings from L and R, offset by time difference
+//   Phantom Center     → phase coherence pulls image toward center (focused source)
+//   Diffuse Field      → decorrelation spreads sources wide (ambient wash)
+//   Precedence Lock    → first-arrival wavefront locks perceived direction
+//
+// World: grid floor for depth grounding, fog density 0.04, dark ambient.
+// Camera: orbiting the soundfield, FOV 0.9 (VR: head pose from OpenXR).
+// 16-source culling: only center sub (si=1) renders for VR performance.
+//
+// DSP: LUFS→source intensity, crest→localization sharpness, THD→spatial jitter,
+//      phase→L/R coherence (phantom center vs diffuse). HDR output to Layer 0.
 
-#include "include/audio_cb.hlsl"
-#include "include/dsp_cb.hlsl"
-#include "include/color_utils.hlsl"
-#include "include/noise.hlsl"
-#include "include/raymarch.hlsl"
-#include "include/audio_reactive.hlsl"
+#include "include/spatial_encoder.hlsl"
 #include "include/layers.hlsl"
 
 #define PI 3.14159265
-#define N_COMP 8
-#define N_PARTICLES 24
-#define MAX_STEPS 48
 
-struct Particle {
-    float3 pos;
-    float energy;
-    float gate;
-    float freqFrac;
-};
-
-void computeParticles(out Particle parts[N_PARTICLES], float bands[8], float dspBands[8],
-                      float kickSurge, float beatPulse, float stereoBal, float stereoWid, float crest, float thd,
-                      float transient, float envelope, float section)
+// ── ILD vector — visible beam between L and R emitters showing level difference ──
+// The brain uses interaural level differences to localize sound horizontally.
+// Wider beam = bigger level difference = sound is more lateralized.
+float3 ildVector(float2 p, SeEmitter eL, SeEmitter eR, float phaseCoh,
+                 float stereoWid, float silence)
 {
-    [unroll] for (int n = 0; n < N_PARTICLES; n++)
-    {
-        int band = n / 3;
-        int sub = n % 3;
-        float bt = float(band) / float(N_COMP - 1);
+    if (eL.active < 0.01 || eR.active < 0.01) return float3(0, 0, 0);
+    if (eL.intensity < 0.05 && eR.intensity < 0.05) return float3(0, 0, 0);
 
-        float rawEnergy = bands[band] + dspBands[band] * 0.12;
-        float energy = (band < 4) ? pow(rawEnergy, 0.5) : rawEnergy;
-        float gate = smoothstep(0.02, 0.08, rawEnergy);
+    // Line from L to R in screen space
+    float2 ab = eR.screenPos - eL.screenPos;
+    float lineLen2 = dot(ab, ab);
+    if (lineLen2 < 0.0001) return float3(0, 0, 0);
 
-        // Torus coordinates — 3 particles per band at 120° offset
-        float torAng = float(sub) * (PI * 2.0 / 3.0) + float(band) * 0.7 + stereoBal * 0.4;
-        float polAng = float(band) * 0.5 + Time * 0.3 * (0.5 + bt * 0.5);
+    float t = saturate(dot(p - eL.screenPos, ab) / lineLen2);
+    float2 closest = eL.screenPos + ab * t;
+    float2 lineDiff = p - closest;
+    float lineDist2 = dot(lineDiff, lineDiff);
 
-        // Bass pinches torus radius
-        float R = 1.2 + stereoWid * 0.3;
-        float rr = 0.5 + bands[0] * 0.15 + bands[1] * 0.1;
+    // Beam width — wider when level difference is large (more lateralized)
+    float levelDiff = abs(eL.intensity - eR.intensity);
+    float beamWidth = 0.003 + levelDiff * 0.008 * (1.0 + stereoWid);
+    if (lineDist2 > beamWidth * 4.0) return float3(0, 0, 0);
 
-        // Cyclotron frequency — mids drive field strength
-        float B = 3.0 + bands[2] * 2.0 + bands[3] * 1.5;
-        float omegaC = B * (1.0 + crest * 0.3);
-        polAng += sin(torAng * omegaC + Time * 2.0) * 0.3;
+    // Beam intensity — stronger when both sides are active
+    float lineDist = sqrt(lineDist2);
+    float beamIntensity = exp(-lineDist * lineDist / (beamWidth * beamWidth));
+    float avgIntensity = (eL.intensity + eR.intensity) * 0.5;
 
-        parts[n].pos = float3(
-            (R + rr * cos(polAng)) * cos(torAng),
-            rr * sin(polAng),
-            (R + rr * cos(polAng)) * sin(torAng)
-        );
+    // Phase coherence: coherent = tight focused beam (phantom center)
+    // Decorrelated = wide diffuse beam (spacious, ambient)
+    float coherenceFocus = lerp(0.5, 2.0, phaseCoh);
+    beamIntensity *= coherenceFocus;
 
-        // Staggered beat breathing — bass less, highs more
-        float h = energy * (0.3 + beatPulse * 0.7 * (0.5 + bt * 0.5));
-        // Staggered transient — bass less, highs more
-        h += transient * lerp(0.05, 0.2, bt) * gate;
-        h += envelope * lerp(0.08, 0.03, bt) * gate;
-        h += section * 0.05 * gate;
-        // Kick surge on bass
-        h += (band < 2) ? kickSurge * kickSurge * lerp(0.4, 0.1, bt) : 0.0;
-        h *= gate;
+    // Color: blend L and R colors, shifted by pan position
+    float3 beamCol = lerp(eL.color, eR.color, t);
 
-        parts[n].energy = clamp(h, 0.0, 1.5);
-        parts[n].gate = gate;
-        parts[n].freqFrac = bt;
-    }
-}
-
-// Plasma density field — volumetric
-float plasmaDensity(float3 p, Particle parts[N_PARTICLES], float bands[8],
-                    float beatPulse, float kickSurge, float transient, float envelope,
-                    float lufs, float crest, float thd, float phaseCoh, float silence)
-{
-    float density = 0.0;
-
-    // Toroidal containment — Gaussian falloff from torus surface
-    float R = 1.2;
-    float2 toroidal = float2(length(p.xz) - R, p.y);
-    float dist = length(toroidal);
-    float containment = exp(-dist * dist * (3.0 + bands[0] * 2.0)) * silence;
-
-    // Cyclotron modulation — particles spiral along field lines
-    float poloidal = atan2(p.y, length(p.xz) - R);
-    float toroidalAng = atan2(p.z, p.x);
-    float B = 3.0 + bands[2] * 2.0 + bands[3] * 1.5;
-    float cyclotron = sin(poloidal * B + Time * 2.0 + toroidalAng * 3.0);
-    density = containment * (0.6 + cyclotron * 0.3);
-
-    // Turbulence — highs drive eddy formation
-    float3 turbPos = p * 2.0 + float3(Time * 0.5, 0, Time * 0.3);
-    density += fbm3_4(turbPos) * (bands[4] * 0.4 + bands[5] * 0.3) * (1.0 + thd * 0.5) * containment;
-
-    // Per-particle glow contribution
-    [unroll] for (int n = 0; n < N_PARTICLES; n++)
-    {
-        if (parts[n].gate < 0.01) continue;
-        float pd = length(p - parts[n].pos);
-        density += exp(-pd * pd * 8.0) * parts[n].energy * 0.3;
+    // Center bright spot — phantom center image when phase is coherent
+    float centerGlow = 0.0;
+    if (phaseCoh > 0.4) {
+        float2 midPt = (eL.screenPos + eR.screenPos) * 0.5;
+        float midDist = length(p - midPt);
+        centerGlow = exp(-midDist * midDist * 300.0) * phaseCoh * avgIntensity * 0.08;
     }
 
-    // Beat — magnetic reconnection event
-    density += beatPulse * exp(-dist * 2.0) * abs(sin(toroidalAng * 4.0 + Time * 8.0)) * 0.3 * silence;
+    float3 col = beamCol * beamIntensity * avgIntensity * 0.03 * silence;
+    col += float3(0.85, 0.9, 1.0) * centerGlow * silence;
 
-    // Kick — containment collapse
-    density += kickSurge * exp(-dist * 4.0) * 0.5 * silence;
-
-    // Phase coherence — coherent plasma has tighter field lines
-    density *= lerp(0.6, 1.2, phaseCoh);
-
-    // LUFS additive
-    density *= (1.0 + lufs * 0.2);
-
-    // Noise gate
-    density *= smoothstep(0.002, 0.02, density);
-
-    return density;
+    return col;
 }
 
-float3 plasmaColor(float3 p, float density, float bands[8], AudioData a, float lufs)
+// ── ITD wavefront — expanding ring offset by interaural time difference ──
+// The brain detects sub-millisecond timing differences between ears.
+// We visualize this as wavefronts from L and R that are phase-offset.
+float3 itdWavefront(float2 p, SeEmitter e, float stereoDiff, float phaseCoh,
+                    float beatPulse, float silence)
 {
-    // Temperature from high bands (particle energy)
-    float energy = bands[6] * 0.4 + bands[7] * 0.3 + a.envelope * 0.3;
-    float temp = 0.3 + energy * 0.7;
+    if (e.active < 0.01 || e.intensity < 0.05) return float3(0, 0, 0);
 
-    float3 hotColor = float3(0.4, 0.6, 1.0);
-    float3 warmColor = float3(1.0, 0.5, 0.2);
-    float3 coolColor = float3(0.8, 0.2, 0.3);
+    float2 diff = p - e.screenPos;
+    float d = length(diff);
+    float s = e.screenSize;
 
-    float3 col = lerp(coolColor, warmColor, smoothstep(0.2, 0.5, temp));
-    col = lerp(col, hotColor, smoothstep(0.5, 0.9, temp));
+    float maxR = s * 6.0;
+    if (d > maxR) return float3(0, 0, 0);
 
-    // Brain palette blend
-    float toroidalAng = atan2(p.z, p.x);
-    float freqFrac = (toroidalAng + PI) / (2.0 * PI);
-    col = lerp(col, hsv(a.hueBase + freqFrac * a.hueRange, 0.6 * a.satur, 0.9), 0.3);
-    col = lerp(col, a.brainCol, 0.2);
-    col = lerp(col, a.brainCol2, bands[3] * 0.2);
+    // ITD offset — stereo difference creates timing offset between L and R wavefronts
+    float itdOffset = stereoDiff * 0.15 * (1.0 - phaseCoh);
 
-    // Emission
-    col *= density * (0.4 + energy * 1.5) * (1.0 + lufs * 0.2);
+    // Expanding wavefront — phase offset by ITD
+    float wp = e.wavePhase + itdOffset * float(e.side * 2 - 1);  // L and R offset oppositely
+    float bandFrac = float(e.bandIdx) / 7.0;
+    float waveSpeed = lerp(0.4, 1.0, bandFrac);
+
+    float3 col = float3(0, 0, 0);
+    [unroll] for (int w = 0; w < 2; w++) {
+        float phaseOffset = float(w) * 0.5;
+        float ringR = frac(wp * waveSpeed * 0.12 + phaseOffset) * maxR;
+        float ringDist = abs(d - ringR);
+        float ringWidth = s * 0.3;
+        float ringIntensity = exp(-ringDist * ringDist / (ringWidth * ringWidth));
+
+        float amp = e.intensity * e.depthFog * (1.0 + beatPulse * 0.3);
+        col += e.color * ringIntensity * amp * 0.025 * silence;
+    }
 
     return col;
 }
@@ -158,117 +121,129 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target
     float r = length(p);
     float silence = 1.0 - a.isSilent;
 
+    // ── DSP additive ──
     float lufs = lufsNormalized();
     float crest = crestFactorNormalized();
     float thd = thdNormalized();
     float phaseCoh = phaseCoherence();
+    float phaseCorr = phaseCoherence();
 
-    float bands[8] = { a.b0, a.b1, a.b2, a.b3, a.b4, a.b5, a.b6, a.b7 };
-    float dspBands[8] = { DspBand0, DspBand1, DspBand2, DspBand3, DspBand4, DspBand5, DspBand6, DspBand7 };
+    // ── Audio dynamics ──
     float beatPulse = a.beat * a.tempoConf;
     float kickSurge = a.kick * a.kickConf * exp(-a.beatPhase * 3.0);
     float transientAmt = a.transient;
     float envelope = a.envelope;
-    float phrase = phrasePulse(a);
+    float beatBright = a.beat * a.tempoConf;
 
-    Particle parts[N_PARTICLES];
-    computeParticles(parts, bands, dspBands, kickSurge, beatPulse, a.stereoBal, a.stereoWid, crest, thd,
-                     transientAmt, envelope, a.section);
+    // ── Camera — VR head pose or desktop orbit around soundfield ──
+    SeCamera cam;
+    if (VR_ACTIVE) {
+        cam = seCameraVR();
+    } else {
+        float FOV = 0.9;
+        float camAng = a.section * 0.1 + a.stereoBal * 0.05 + Time * 0.003 * a.motSpeed;
+        float3 camPos = float3(sin(camAng) * 3.0, 1.2 + a.stereoDiff * 0.1, 3.0 + cos(camAng) * 0.8);
+        cam = seCamera(camPos, float3(0, 0, 0), FOV);
+    }
 
-    // ── Camera — section-driven orbit ──
-    float FOV = 0.6;
-    float camAng = a.section * 0.8 + a.stereoBal * 0.2 + Time * 0.03 * a.motSpeed;
-    float3 camPos = float3(sin(camAng) * 3.5, 0.8 + a.stereoDiff * 0.15, cos(camAng) * 3.5);
-    float3 camTarget = float3(a.stereoBal * 0.2, 0, 0);
-    float3 rd = cameraRay(camPos, camTarget, float2(-p.x, -p.y), FOV);
+    // ── Spatial encoder: RADIAL profile ──
+    SeParams params = seParams(SE_PROFILE_RADIAL);
+    params.widthScale = 2.5;
+    params.heightScale = 1.5;
+    params.depthScale = 3.5;
+    params.jitterAmt = 0.15 + thd * 0.2;
+    params.stereoWid = a.stereoWid;
 
-    // ── Background — deep space ──
-    float3 col = float3(0.002, 0.001, 0.008) * silence;
-    col += starfield(uv, a) * 0.03;
-    col += godRays(p, r, a) * 0.05 * silence;
+    float bands[8] = { a.b0, a.b1, a.b2, a.b3, a.b4, a.b5, a.b6, a.b7 };
 
-    // ── Volumetric raymarch through plasma ──
-    float t = 0.15;
-    float3 accum = float3(0, 0, 0);
-    float transmittance = 1.0;
-    float stepSize = 0.08;
+    SeEmitter emit[SE_NUM_OBJ];
+    seComputeEmitters(emit, bands, a, cam, params,
+                      lufs, crest, thd, phaseCoh,
+                      beatPulse, kickSurge, transientAmt, envelope);
 
-    [loop] for (int i = 0; i < MAX_STEPS; i++) {
-        float3 sp = camPos + rd * t;
-        if (length(sp) > 3.0) break;
+    // ── World environment — floor + back wall ──
+    SeWorld world = seWorld(0.04, float3(0.003, 0.002, 0.008), -1.5, 0.0, -6.0);
+    world.gridScale = 2.0;
+    world.gridIntensity = 0.035;
+    world.ambientLevel = 0.004;
+    world.ambientColor = float3(0.01, 0.008, 0.02);
+    world.flags = 5;  // floor + back wall
+    seApplyWorldFog(emit, world);
 
-        float density = plasmaDensity(sp, parts, bands, beatPulse, kickSurge, transientAmt,
-                                       envelope, lufs, crest, thd, phaseCoh, silence);
-        density *= smoothstep(0.002, 0.02, density);
+    // ── Background — world environment + subtle starfield ──
+    float3 col = seWorldEnvironment(p, cam, world, a, kickSurge, silence);
+    col += starfield(uv, a) * 0.005;
 
-        if (density > 0.003) {
-            float3 pointCol = plasmaColor(sp, density, bands, a, lufs);
-            float depthFog = exp(-t * 0.08);
-            float emission = density * (0.5 + a.brightness * 0.3) * depthFog;
+    // ── ILD vectors — interaural level difference beams (16-source culling) ──
+    [loop] for (int bi = 0; bi < SE_N_BANDS; bi++) {
+        int li = bi * SE_N_SUB * 2 + 2;  // si=1, left
+        int ri = bi * SE_N_SUB * 2 + 3;  // si=1, right
+        col += ildVector(p, emit[li], emit[ri], phaseCoh, a.stereoWid, silence);
+    }
 
-            float sigma = density * 0.15 + 0.02;
-            transmittance *= exp(-sigma * stepSize);
+    // ── ITD wavefronts — interaural time difference rings (16-source culling) ──
+    [loop] for (int bi2 = 0; bi2 < SE_N_BANDS; bi2++) {
+        int li = bi2 * SE_N_SUB * 2 + 2;
+        int ri = bi2 * SE_N_SUB * 2 + 3;
+        if (emit[li].active > 0.01 && emit[li].depth > 0.1)
+            col += itdWavefront(p, emit[li], a.stereoDiff, phaseCoh, beatPulse, silence);
+        if (emit[ri].active > 0.01 && emit[ri].depth > 0.1)
+            col += itdWavefront(p, emit[ri], a.stereoDiff, phaseCoh, beatPulse, silence);
+    }
 
-            accum += pointCol * emission * transmittance;
+    // ── Direct sound — emitter glow (primary visual, 16-source culling) ──
+    if (VR_ACTIVE) {
+        float3 headPos = float3(VRHeadPos.xyz);
+        [loop] for (int bi3 = 0; bi3 < SE_N_BANDS; bi3++) {
+            int li = bi3 * SE_N_SUB * 2 + 2;
+            int ri = bi3 * SE_N_SUB * 2 + 3;
+            if (emit[li].active > 0.01 && emit[li].depth > 0.1)
+                col += seEmitGlowVR(p, emit[li], world, headPos, silence);
+            if (emit[ri].active > 0.01 && emit[ri].depth > 0.1)
+                col += seEmitGlowVR(p, emit[ri], world, headPos, silence);
         }
-        t += stepSize;
+    } else {
+        [loop] for (int bi4 = 0; bi4 < SE_N_BANDS; bi4++) {
+            int li = bi4 * SE_N_SUB * 2 + 2;
+            int ri = bi4 * SE_N_SUB * 2 + 3;
+            if (emit[li].active > 0.01 && emit[li].depth > 0.1)
+                col += seEmitGlowDepth(p, emit[li], world, lufs, crest, beatBright,
+                                       a.beatPhase, kickSurge, transientAmt, silence);
+            if (emit[ri].active > 0.01 && emit[ri].depth > 0.1)
+                col += seEmitGlowDepth(p, emit[ri], world, lufs, crest, beatBright,
+                                       a.beatPhase, kickSurge, transientAmt, silence);
+        }
     }
 
-    col += accum * silence;
-
-    // ── Per-particle projected glow ──
-    float3 fwd = normalize(camTarget - camPos);
-    float3 right = normalize(cross(fwd, float3(0, 1, 0)));
-    float3 up = cross(right, fwd);
-
-    [unroll] for (int j = 0; j < N_PARTICLES; j++) {
-        if (parts[j].gate < 0.01) continue;
-        float3 toObj = parts[j].pos - camPos;
-        float depth = dot(toObj, fwd);
-        if (depth < 0.1) continue;
-        float2 scr = float2(dot(toObj, right) / (depth * FOV), dot(toObj, up) / (depth * FOV));
-        float scrDist = length(p - scr);
-
-        float pSize = 0.015 + parts[j].energy * 0.04;
-        float pGlow = exp(-scrDist * scrDist / (pSize * pSize));
-
-        float3 pCol = lerp(a.brainCol, a.brainCol2, parts[j].freqFrac);
-        pCol = lerp(pCol, hsv(a.hueBase + parts[j].freqFrac * a.hueRange, 0.6 * a.satur, 0.9), 0.3);
-        pCol *= parts[j].energy * (1.0 + lufs * 0.15);
-
-        float depthFade = exp(-depth * 0.15);
-        col += pCol * pGlow * depthFade * 0.5 * silence;
+    // ── L↔R links — phase coherence beams ──
+    [loop] for (int lb = 0; lb < SE_N_BANDS; lb++) {
+        col += seLinkLR(p, emit, lb, phaseCorr, phaseCoh, silence);
     }
 
-    // ── Beat ring — expanding, not center flash ──
-    float ringDist = abs(r - a.beatPhase * 0.7);
-    col += a.brainCol * exp(-ringDist * ringDist * 40.0) * beatPulse * 0.025 * silence;
+    // ── Listener focal point — spatial anchor ──
+    col += seListener(p, cam, a, beatPulse, kickSurge, silence);
 
-    // ── Kick flash ──
-    col += a.brainCol2 * kickSurge * 0.05 * exp(-r * r * 5.0) * silence;
+    // ── Diffuse field glow — decorrelation creates ambient wash ──
+    float diffuseness = (1.0 - phaseCoh) * envelope * 0.01;
+    col += a.brainCol2 * diffuseness * exp(-r * 1.5) * silence;
+    col += a.brainCol3 * diffuseness * 0.005 * silence;
 
-    // ── Transient pop ──
-    col += float3(1.0, 0.8, 0.5) * transientAmt * 0.025 * silence;
-
-    // ── ColorPulse ──
-    col += a.brainCol3 * a.colorPulse * 0.02 * silence;
-
-    // ── Energy + punch ──
-    col += a.brainCol2 * a.energy * 0.015 * silence;
-    col += a.brainCol * a.punch * 0.015 * silence;
-
-    // ── Beat anticipation — pre-beat tension ──
-    col += a.brainCol * a.beatAnt * 0.01 * exp(-r * 2.0) * silence;
+    // ── Ambient energy — minimal ──
+    col += a.brainCol3 * a.colorPulse * 0.01 * silence;
+    col += a.brainCol * a.energy * 0.005 * silence;
+    col += a.brainCol2 * a.punch * 0.005 * silence;
+    col += a.brainCol * a.beatAnt * 0.008 * exp(-r * 2.0) * silence;
 
     // ── Dynamic range — quiet passages dark ──
     col *= (0.3 + a.gated * 0.7);
 
-    // ── Standard overlays ──
+    // ── Standard overlays (sparing) ──
     col += standardOverlays(p, r, a) * 0.02;
 
-    // ── HDR limiter — dark volumetric mode ──
-    float maxC = max(col.r, max(col.g, col.b));
-    if (maxC > 1.2) col *= 1.2 / maxC;
+        // ── Active-emitter normalization — busy music doesn't stack brighter ──
+    col *= sqrt(16.0 / seActiveCount(emit));
+    // ── Soft tone mapping (Reinhard) — no hard clamp, preserves color ──
+    col = softReinhard(col);
 
     col *= silence;
 

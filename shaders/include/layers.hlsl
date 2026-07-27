@@ -1,6 +1,25 @@
 // Layer composition — blend modes, starfield, god rays, common layered elements
 // NOTE: Must be included AFTER audio_reactive.hlsl
 
+// ── Soft tone mapping (Reinhard) — replaces hard HDR clamp ──
+// Dark/medium brightness passes through unchanged. Only highlights compress.
+// Prevents color desaturation that the hard clamp (col *= 1/maxC) causes.
+float3 softReinhard(float3 col) {
+    return col / (1.0 + col);
+}
+
+// ── Additive budget — normalize a pass contribution by active count ──
+// Each rendering stage gets a fixed budget. Divide by active emitters so
+// busy music (many active) doesn't stack brighter than quiet music (few active).
+float3 budgetPass(float3 passCol, float budget, float activeCount) {
+    if (activeCount < 1.0) activeCount = 1.0;
+    float maxC = max(passCol.r, max(passCol.g, passCol.b));
+    if (maxC < 0.001) return float3(0, 0, 0);
+    float scale = budget / (maxC * activeCount);
+    scale = min(scale, 1.0);  // don't amplify quiet passes
+    return passCol * scale;
+}
+
 // ── Blend modes (roadmap Phase 2 spec) ──
 
 float3 blendScreen(float3 base, float3 blend) {
