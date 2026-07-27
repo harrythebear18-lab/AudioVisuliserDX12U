@@ -173,8 +173,9 @@ float3 seEncodePosition(int bandIdx, int subIdx, int side,
     float transientScatter = transientAmt * 0.3 * params.jitterAmt;
     float sharpness = 1.0 / (1.0 + crest * 0.3);
 
-    // THD jitter
-    float jt = floor(Time * 4.0 * params.motionSpeed);
+    // THD jitter — wrap time to prevent float32 precision loss after hours
+    float wrappedTime = Time % 3600.0;
+    float jt = floor(wrappedTime * 4.0 * params.motionSpeed);
     float jitterX = (hash11(float(bandIdx) * 17.3 + jt) - 0.5) * thd * 0.04 * params.jitterAmt;
     float jitterY = (hash11(float(bandIdx) * 19.7 + jt) - 0.5) * thd * 0.03 * params.jitterAmt;
 
@@ -239,7 +240,7 @@ float3 seEncodePosition(int bandIdx, int subIdx, int side,
         // Corridor — L on left wall, R on right wall, depth by frequency
         float corridorDepth = lerp(params.depthScale * 0.5, -params.depthScale * 0.8, bandFrac);
         float wallX = sideSign * params.widthScale * (0.5 + panMod * 0.3);
-        float wallY = subFrac * params.heightScale * 0.4 + sin(Time * 0.5 * params.motionSpeed + float(bandIdx)) * 0.3;
+        float wallY = subFrac * params.heightScale * 0.4 + sin(wrappedTime * 0.5 * params.motionSpeed + float(bandIdx)) * 0.3;
         pos = float3(
             wallX + jitterX,
             wallY + jitterY,
@@ -321,6 +322,7 @@ void seComputeEmitters(out SeEmitter emit[SE_NUM_OBJ],
                        float envelope)
 {
     float silence = 1.0 - a.isSilent;
+    float wrappedTime = Time % 3600.0;
 
     // ── Global spatial telemetry decomposition ──
     float lrTotal = a.leftEn + a.rightEn + 0.001;
@@ -449,7 +451,7 @@ void seComputeEmitters(out SeEmitter emit[SE_NUM_OBJ],
                     beatPulse, kickSurge, transientAmt, envelope);
                 emit[idx].intensity = lEnergy;
                 emit[idx].active = bandGate;
-                emit[idx].wavePhase = Time * waveFreq + float(bi) * 0.5 + subFrac * PI + phrasePhase * 0.1;
+                emit[idx].wavePhase = wrappedTime * waveFreq + float(bi) * 0.5 + subFrac * PI + phrasePhase * 0.1;
                 emit[idx].bandIdx = bi;
                 emit[idx].side = 0;
                 emit[idx].subIdx = si;
@@ -488,7 +490,7 @@ void seComputeEmitters(out SeEmitter emit[SE_NUM_OBJ],
                     beatPulse, kickSurge, transientAmt, envelope);
                 emit[idx].intensity = rEnergy;
                 emit[idx].active = bandGate;
-                emit[idx].wavePhase = Time * waveFreq + float(bi) * 0.5 + subFrac * PI + PI + phrasePhase * 0.1;
+                emit[idx].wavePhase = wrappedTime * waveFreq + float(bi) * 0.5 + subFrac * PI + PI + phrasePhase * 0.1;
                 emit[idx].bandIdx = bi;
                 emit[idx].side = 1;
                 emit[idx].subIdx = si;
@@ -577,12 +579,13 @@ float3 seLinkLR(float2 p, SeEmitter emit[SE_NUM_OBJ], int bandIdx,
     float2 closest = emit[li].screenPos + ab * t;
     float2 lineDiff = p - closest;
     float lineDist2 = dot(lineDiff, lineDiff);
-    if (lineDist2 > 0.02) return float3(0, 0, 0);
+    if (lineDist2 > 0.04) return float3(0, 0, 0);
 
     float lineDist = sqrt(lineDist2);
     float linkStr = phaseCorr * emit[li].intensity * emit[ri].intensity * 0.1;
     float3 linkCol = lerp(emit[li].color, emit[ri].color, 0.5);
-    float3 col = linkCol * exp(-lineDist * lineDist * 600.0) * linkStr * silence;
+    float lineFade = smoothstep(0.04, 0.02, lineDist2);
+    float3 col = linkCol * exp(-lineDist * lineDist * 300.0) * linkStr * lineFade * silence;
 
     if (phaseCoh > 0.5) {
         float2 midPt = (emit[li].screenPos + emit[ri].screenPos) * 0.5;
@@ -665,11 +668,11 @@ float3 seWorldEnvironment(float2 p, SeCamera cam, SeWorld world,
         float3 hitPos = cam.pos + rd * tFloor;
         float2 gridUV = float2(hitPos.x * world.gridScale, -hitPos.z * world.gridScale * 0.9);
         float2 gridId = abs(frac(gridUV) - 0.5);
-        float gridLine = smoothstep(0.42, 0.5, max(gridId.x, gridId.y));
+        float gridLine = smoothstep(0.35, 0.5, max(gridId.x, gridId.y));
         float gridFade = smoothstep(0.0, 8.0, tFloor) * smoothstep(30.0, 12.0, tFloor);
         float floorMask = floorHit * float(world.flags & 1);
-        col += a.brainCol * gridLine * world.gridIntensity * gridFade * floorMask * silence;
-        col += a.brainCol2 * gridLine * kickSurge * world.gridIntensity * 1.5 * gridFade * floorMask * silence;
+        col += a.brainCol * gridLine * world.gridIntensity * 0.7 * gridFade * floorMask * silence;
+        col += a.brainCol2 * gridLine * kickSurge * world.gridIntensity * 1.0 * gridFade * floorMask * silence;
     }
 
     // Ceiling grid — branchless
@@ -679,10 +682,10 @@ float3 seWorldEnvironment(float2 p, SeCamera cam, SeWorld world,
         float3 hitPos = cam.pos + rd * tCeil;
         float2 gridUV = float2(hitPos.x * world.gridScale, -hitPos.z * world.gridScale * 0.9);
         float2 gridId = abs(frac(gridUV) - 0.5);
-        float gridLine = smoothstep(0.42, 0.5, max(gridId.x, gridId.y));
+        float gridLine = smoothstep(0.35, 0.5, max(gridId.x, gridId.y));
         float gridFade = smoothstep(0.0, 8.0, tCeil) * smoothstep(30.0, 12.0, tCeil);
         float ceilMask = ceilHit * float(world.flags & 2);
-        col += a.brainCol2 * gridLine * world.gridIntensity * 0.7 * gridFade * ceilMask * silence;
+        col += a.brainCol2 * gridLine * world.gridIntensity * 0.5 * gridFade * ceilMask * silence;
     }
 
     // Back wall grid — branchless
@@ -692,10 +695,10 @@ float3 seWorldEnvironment(float2 p, SeCamera cam, SeWorld world,
         float3 hitPos = cam.pos + rd * tWall;
         float2 wallUV = float2(hitPos.x * world.gridScale * 0.9, hitPos.y * world.gridScale * 0.9);
         float2 wallId = abs(frac(wallUV) - 0.5);
-        float wallLine = smoothstep(0.42, 0.5, max(wallId.x, wallId.y));
+        float wallLine = smoothstep(0.35, 0.5, max(wallId.x, wallId.y));
         float wallFade = smoothstep(0.0, 5.0, tWall) * smoothstep(30.0, 12.0, tWall);
         float wallMask = wallHit * float(world.flags & 4);
-        col += a.brainCol * wallLine * world.gridIntensity * 0.6 * wallFade * wallMask * silence;
+        col += a.brainCol * wallLine * world.gridIntensity * 0.4 * wallFade * wallMask * silence;
     }
 
     return col;
@@ -715,6 +718,7 @@ float3 seEmitGlowDepth(float2 p, SeEmitter e, SeWorld world,
 
     float cullRad2 = s2 * 55.2;
     if (d2 > cullRad2) return float3(0, 0, 0);
+    float cullFade = smoothstep(cullRad2 * 0.7, cullRad2, d2);
 
     // Atmospheric perspective — uses precomputed depthFog from SeEmitter (no exp() here)
     // nearFade clamps objects too close to camera (VR vergence safety)
@@ -728,21 +732,23 @@ float3 seEmitGlowDepth(float2 p, SeEmitter e, SeWorld world,
 
     float outer = exp(-d2 / (s2 * 8.0));
     float mid = exp(-d2 / (s2 * 2.5));
-    float core = exp(-d2 / (s2 * 0.25));
+    float core = exp(-d2 / (s2 * 0.6));
 
     // Desaturate color for distant objects
     float3 emitCol = lerp(dot(e.color, float3(0.33, 0.33, 0.34)), e.color, satFade);
 
-    col += emitCol * outer * e.intensity * 0.07 * brightFade * (1.0 + lufs * 0.25) * silence;
-    col += emitCol * mid * (0.05 + e.intensity * 0.17) * 0.12 * brightFade * silence;
-    col += float3(0.9, 0.95, 1.0) * core * e.intensity * (0.5 + beatBright * 0.5) * (1.0 + crest * 0.3) * 0.13 * brightFade * silence;
+    col += emitCol * outer * e.intensity * 0.07 * brightFade * (1.0 + lufs * 0.25) * (1.0 - cullFade) * silence;
+    col += emitCol * mid * (0.05 + e.intensity * 0.17) * 0.12 * brightFade * (1.0 - cullFade) * silence;
+    float coreBright = core * e.intensity * (0.5 + beatBright * 0.5) * (1.0 + crest * 0.3) * 0.08 * brightFade * (1.0 - cullFade) * silence;
+    coreBright = min(coreBright, 0.8);  // cap per-emitter to prevent bloom triggering on every node
+    col += float3(0.9, 0.95, 1.0) * coreBright;
 
     // Wave rings — dimmed by fog
     float wp = e.wavePhase;
     float r1 = frac(wp * 0.3) * s * 6.0;
-    col += emitCol * exp(-abs(d - r1) * 50.0 / e.depth) * e.intensity * 0.05 * brightFade * silence;
+    col += emitCol * exp(-abs(d - r1) * 25.0 / e.depth) * e.intensity * 0.05 * brightFade * (1.0 - cullFade) * silence;
     float r2 = frac(wp * 0.3 + 0.33) * s * 6.0;
-    col += emitCol * exp(-abs(d - r2) * 60.0 / e.depth) * e.intensity * 0.03 * brightFade * silence;
+    col += emitCol * exp(-abs(d - r2) * 30.0 / e.depth) * e.intensity * 0.03 * brightFade * (1.0 - cullFade) * silence;
 
     if (e.bandIdx <= 1) {
         col += float3(1.0, 0.5, 0.15) * core * kickLunge * e.intensity * 0.04 * brightFade * silence;
@@ -750,12 +756,12 @@ float3 seEmitGlowDepth(float2 p, SeEmitter e, SeWorld world,
 
     if (transientAmt > 0.15) {
         float trR = transientAmt * s * 5.0;
-        col += emitCol * exp(-abs(d - trR) * 60.0 / e.depth) * transientAmt * 0.05 * brightFade * silence;
+        col += emitCol * exp(-abs(d - trR) * 30.0 / e.depth) * transientAmt * 0.05 * brightFade * (1.0 - cullFade) * silence;
     }
 
     if (beatBright > 0.1) {
         float br = beatPhase * s * 4.0;
-        col += emitCol * exp(-abs(d - br) * 100.0 / e.depth) * beatBright * 0.02 * brightFade * silence;
+        col += emitCol * exp(-abs(d - br) * 50.0 / e.depth) * beatBright * 0.02 * brightFade * (1.0 - cullFade) * silence;
     }
 
     // Fog tint — blend distant emission toward fog color

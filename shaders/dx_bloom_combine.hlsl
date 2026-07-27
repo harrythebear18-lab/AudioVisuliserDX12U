@@ -15,6 +15,6 @@ struct PSInput {
 float4 main(PSInput input) : SV_TARGET {
     float3 scene = SceneTex.Sample(PointSampler, input.uv).rgb;
     float3 bloom = BloomTex.Sample(PointSampler, input.uv).rgb;
-    float3 col = scene + bloom * 0.8;
+    float3 col = scene + bloom * 0.5;
     return float4(col, 1.0);
 }

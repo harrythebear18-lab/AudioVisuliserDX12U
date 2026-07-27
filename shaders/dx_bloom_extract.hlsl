@@ -14,7 +14,7 @@ struct PSInput {
 float4 main(PSInput input) : SV_TARGET {
     float3 scene = SceneTex.Sample(PointSampler, input.uv).rgb;
     float brightness = max(scene.r, max(scene.g, scene.b));
-    float threshold = 0.7;
-    float3 bloom = scene * smoothstep(threshold, threshold + 0.2, brightness);
+    float threshold = 1.2;
+    float3 bloom = scene * smoothstep(threshold, threshold + 0.3, brightness);
     return float4(bloom, 1.0);
 }

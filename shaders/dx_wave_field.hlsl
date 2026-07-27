@@ -44,17 +44,26 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target
     if (VR_ACTIVE) {
         cam = seCameraVR();
     } else {
-        float camAng = a.section * 0.15 + a.stereoBal * 0.08 + Time * 0.005 * a.motSpeed;
+        float camAng = a.section * 0.15 + a.stereoBal * 0.08 + (Time % 3600.0) * 0.005 * a.motSpeed;
         float3 camPos = float3(sin(camAng) * 1.5, 1.5 + a.stereoDiff * 0.08, 2.8 + cos(camAng) * 0.3);
         cam = seCamera(camPos, float3(0, -0.3, -2.0), 0.75);
     }
 
-    // ── Spatial encoder: WAVE_FIELD profile ──
+    // ── Spatial encoder: WAVE_FIELD profile — audio-reactive movement ──
     SeParams params = seParams(SE_PROFILE_WAVE_FIELD);
-    params.widthScale = 1.8;
-    params.heightScale = 4.5;
-    params.depthScale = 5.0;
+    // Energy drives depth range — louder music pushes nodes further forward
+    params.depthScale = 3.0 + a.energy * 4.0 + kickSurge * 2.0;
+    // Phase coherence tightens width (coherent = narrow, decorrelated = wide)
+    params.widthScale = 1.2 + (1.0 - phaseCoh) * 1.5 + a.stereoDiff * 0.5;
+    // Transient expands height (sharp transients scatter nodes vertically)
+    params.heightScale = 3.0 + transientAmt * 3.0 + crest * 2.0;
+    // Envelope modulates motion speed (busy music = faster movement)
+    params.motionSpeed = 0.5 + envelope * 1.5 + a.motSpeed * 0.5;
+    // THD jitter
     params.jitterAmt = 0.1 + thd * 0.15;
+    // Stereo width influence
+    params.stereoWid = a.stereoWid;
+    params.stereoBal = a.stereoBal;
 
     float bands[8] = { a.b0, a.b1, a.b2, a.b3, a.b4, a.b5, a.b6, a.b7 };
 
@@ -99,6 +108,46 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target
     // ── Listener focal point ──
     col += seListener(p, cam, a, beatPulse, kickSurge, silence);
 
+    // ── Central bass/sub node — depth + height pulsing with low-end energy ──
+    {
+        float bassEnergy = (a.b0 + a.b1) * 0.5;
+        // 3D position: centered X, height rises with bass, depth pushes forward on kick
+        float3 nodePos = float3(
+            0.0,
+            -0.5 + bassEnergy * 1.5 + kickSurge * 0.8,
+            -1.0 - bassEnergy * 2.0 + kickSurge * 1.5
+        );
+        // Project to screen space
+        float3 toNode = nodePos - cam.pos;
+        float depth = dot(toNode, cam.fwd);
+        if (depth > 0.1) {
+            float3 right = cam.right;
+            float3 up = cam.up;
+            float2 screenPos;
+            screenPos.x = dot(toNode, right) / (depth * cam.fov);
+            screenPos.y = dot(toNode, up) / (depth * cam.fov);
+            float2 diff = p - screenPos;
+            float dist2 = dot(diff, diff);
+            // Core glow — tight bright center
+            float coreRadius = 0.02 + bassEnergy * 0.04 + kickSurge * 0.03;
+            float core = exp(-dist2 / (coreRadius * coreRadius));
+            // Outer halo — softer, larger
+            float haloRadius = coreRadius * 3.0;
+            float halo = exp(-dist2 / (haloRadius * haloRadius)) * 0.3;
+            // Depth fade
+            float depthFade = exp(-depth * 0.15);
+            // Color — warm bass color blending with brain colors
+            float3 nodeCol = lerp(float3(1.0, 0.4, 0.1), a.brainCol, 0.4);
+            nodeCol = lerp(nodeCol, a.brainCol3, bassEnergy * 0.3);
+            col += nodeCol * (core + halo) * (0.15 + bassEnergy * 0.3) * depthFade * silence;
+            // Beat ring expanding from node
+            float ringR = a.beatPhase * 0.15;
+            float ringDist = abs(sqrt(dist2) - ringR);
+            float ring = exp(-ringDist * ringDist * 80.0) * beatPulse * 0.08 * depthFade * silence;
+            col += nodeCol * ring;
+        }
+    }
+
     // ── Ambient energy ──
     col += a.brainCol2 * envelope * 0.006 * exp(-r * 2.5) * silence;
     col += a.brainCol3 * a.colorPulse * 0.01 * silence;
@@ -112,9 +161,9 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target
     // ── Standard overlays ──
     col += standardOverlays(p, r, a) * 0.02;
 
-    // ── HDR limiter ──
+    // ── HDR limiter — allow dynamic range up to 2.0 before clamping ──
     float maxC = max(col.r, max(col.g, col.b));
-    if (maxC > 1.0) col *= 1.0 / maxC;
+    if (maxC > 2.0) col *= 2.0 / maxC;
 
     col *= silence;
 

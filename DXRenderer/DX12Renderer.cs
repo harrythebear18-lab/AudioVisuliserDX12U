@@ -227,6 +227,7 @@ public class DX12Renderer : IRenderer
     private static readonly System.Diagnostics.Stopwatch _renderTimer = System.Diagnostics.Stopwatch.StartNew();
     private long _renderStartTicks;
     public float RenderLatencyMs { get; private set; }
+    private float _smoothedFPS = 60f;
 
     public string BackendName
     {
@@ -2154,6 +2155,7 @@ public class DX12Renderer : IRenderer
             _hud.CurrentModeIndex = _currentMode;
             _hud.TotalModes = _modeNames.Count;
             _hud.VSyncEnabled = VSyncEnabled;
+            _hud.FPS = _smoothedFPS;
             _hud.Render(_commandList, _lastFrame, dt);
         }
 
@@ -2173,6 +2175,7 @@ public class DX12Renderer : IRenderer
         _firstFrame = false;
 
         RenderLatencyMs = (float)(_renderTimer.ElapsedTicks - _renderStartTicks) / System.Diagnostics.Stopwatch.Frequency * 1000f;
+        _smoothedFPS = _smoothedFPS * 0.9f + (1000f / Math.Max(RenderLatencyMs, 0.1f)) * 0.1f;
 
         // Frame statistics
         _frameCount++;
@@ -2301,6 +2304,7 @@ public class DX12Renderer : IRenderer
         _firstFrame = false;
 
         RenderLatencyMs = (float)(_renderTimer.ElapsedTicks - _renderStartTicks) / System.Diagnostics.Stopwatch.Frequency * 1000f;
+        _smoothedFPS = _smoothedFPS * 0.9f + (1000f / Math.Max(RenderLatencyMs, 0.1f)) * 0.1f;
     }
 
     // VR RTV descriptor heap for OpenXR swapchain textures
@@ -2441,6 +2445,7 @@ public class DX12Renderer : IRenderer
         }
 
         RenderLatencyMs = (float)(_renderTimer.ElapsedTicks - _renderStartTicks) / System.Diagnostics.Stopwatch.Frequency * 1000f;
+        _smoothedFPS = _smoothedFPS * 0.9f + (1000f / Math.Max(RenderLatencyMs, 0.1f)) * 0.1f;
     }
 
     private void WaitForGpu()
