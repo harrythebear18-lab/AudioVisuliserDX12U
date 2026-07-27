@@ -1,14 +1,18 @@
 # RTX Audio Visualizer DX12U
 
-A high-fidelity, real-time GPU audio visualizer for Windows, built on **DirectX 12 Ultimate** with HLSL shader-based rendering. It captures system audio via WASAPI, performs FFT analysis through a C# audio pipeline, and drives 29 distinct visualization modes rendered entirely on the GPU.
+A high-fidelity, real-time GPU audio visualizer for Windows, built on **DirectX 12 Ultimate** with HLSL shader-based rendering. It captures system audio via WASAPI, performs FFT analysis through a C# audio pipeline, and drives 48 distinct visualization modes rendered entirely on the GPU. Modes 29–48 use a shared **spatial encoder** backend with psychoacoustic spatial mapping and **OpenXR VR support**.
 
 ## Features
 
-- **29 visualization modes** — from spectrum bars to raymarched fractals, synthwave grids, and 3D rain particles
-- **Real-time audio analysis** — WASAPI loopback capture, 8-band spectrum analyzer, tempo/beat detection, kick/transient detection
+- **48 visualization modes** — from spectrum bars to raymarched fractals, psychoacoustic spatial visualizations, and VR-native audio field rendering
+- **Psychoacoustic spatial modes** — modes 29–48 visualize auditory phenomena: interaural level/time differences, room impulse response, spectral masking, critical bands, standing waves, and more
+- **OpenXR VR support** — stereo rendering with head tracking, IPD offset, VR comfort guidelines (brightness caps, stable horizon, 16-source culling)
+- **Spatial encoder backend** — shared `spatial_encoder.hlsl` maps audio data to 3D positions using psychoacoustic profiles (spherical, radial, tunnel, hemisphere, wave field, psychoacoustic)
+- **Real-time audio analysis** — WASAPI loopback capture, 8-band spectrum analyzer, tempo/beat detection, kick/transient detection, LUFS, crest factor, THD, phase coherence
 - **Fully GPU-rendered** — all visuals are pixel shaders in HLSL, compiled at runtime via DXC
 - **DX12 Ultimate support** — leverages DXR, mesh shaders, and work graphs where available
-- **Audio-reactive everything** — bass, mids, highs, kick, beat, transient, stereo balance, and spectrum data all feed into shader uniforms
+- **Audio-reactive everything** — bass, mids, highs, kick, beat, transient, stereo balance, LUFS, crest, THD, phase coherence, and spectrum data all feed into shader uniforms
+- **Soft tone mapping + additive budget** — Reinhard tone mapping and active-emitter normalization prevent brightness stacking on busy music tracks
 - **Ollama vision feedback** — optional AI-driven visual quality assessment loop
 
 ## Architecture
@@ -20,7 +24,7 @@ AudioPipeline (C# DLL)
     RDMA Triple Buffer (zero-copy GPU upload)
          ↓
     DX12Renderer (C#)
-    └── HLSL Pixel Shaders (29 modes, runtime-compiled via DXC)
+    └── HLSL Pixel Shaders (48 modes, runtime-compiled via DXC)
          └── Audio constant buffers + spectrum textures → shader uniforms
 ```
 
@@ -31,8 +35,9 @@ AudioPipeline (C# DLL)
 | `AudioPipeline/` | C# DLL — WASAPI audio capture, FFT, band analysis, tempo/kick detection |
 | `DXRenderer/` | C# DX12 renderer — swap chain, shader compilation, constant buffers, mode management |
 | `RDMAReader/` | RDMA signal backbone — triple-buffered zero-copy data transfer |
-| `shaders/` | 29 HLSL pixel shaders + shared includes (audio, noise, SDF, raymarch, postfx) |
-| `shaders/include/` | Shared shader libraries — `audio_cb.hlsl`, `noise.hlsl`, `sdf.hlsl`, `raymarch.hlsl`, `postfx.hlsl`, `audio_reactive.hlsl`, `layers.hlsl`, `color_utils.hlsl` |
+| `shaders/` | 48 HLSL pixel shaders + shared includes (audio, noise, SDF, raymarch, postfx, spatial encoder) |
+| `shaders/include/` | Shared shader libraries — `audio_cb.hlsl`, `noise.hlsl`, `sdf.hlsl`, `raymarch.hlsl`, `postfx.hlsl`, `audio_reactive.hlsl`, `layers.hlsl`, `color_utils.hlsl`, `dsp_cb.hlsl`, `spatial_encoder.hlsl` |
+| `DXRenderer/OpenXRManager.cs` | OpenXR VR integration — stereo rendering, head pose, IPD, comfort settings |
 | `audio/` | Python audio engine bridge (legacy/alternative path) |
 | `render/` | Python GPU renderer bridge (legacy/alternative path) |
 | `electron/` | Electron-based UI shell |
@@ -73,6 +78,24 @@ AudioPipeline (C# DLL)
 | 27 | `matrix_rain` | 3D Rain Particles | Falling streaks with parallax depth + audio-reactive density |
 | 28 | `waveform_tunnel` | Audio Waveform Tunnel | Neon polar tunnel flythrough with spectrum-modulated rings |
 | 29 | `crystal_lattice` | Synthwave Grid | Tron-style perspective grid with sun and audio shockwaves |
+| 30 | `space_plasma` | Auditory Soundfield | ILD/ITD stereo localization — interaural level difference beams and time-difference wavefronts |
+| 31 | `gravitational_waves` | Acoustic Room Response | Room impulse response — direct sound, image source reflections, room modes, reverb tail |
+| 32 | `fluid_dynamics` | Fluid Dynamics | Navier-Stokes volumetric fluid simulation |
+| 33 | `lightning_storm` | Spectral Masking Cascade | Auditory masking — simultaneous masking shadows, forward temporal masking, critical band edges |
+| 34 | `neon_cityscape` | Neon Cityscape | Synthwave skyline with neon windows and reflections |
+| 35 | `spectrum_waterfall` | Spatial Audio Sonar | 360° immersive 3D sonar display with range rings |
+| 36 | `cosmic_web` | Gravitational Wavefield | Spacetime fabric with gravitational wells |
+| 37 | `laser_show` | Resonance Field | 3D Chladni standing wave patterns at spatial audio positions |
+| 38 | `neural_synapse` | Neural Synapse Storm | 3D neural network with synapse firing |
+| 39 | `hologram_projector` | Acoustic Hologram Projector | Volumetric hologram table with wave field surface |
+| 40 | `quantum_interferometer` | Quantum Field Interferometer | Wave-particle duality visualization |
+| 41 | `aurora_cathedral` | Spectral Aurora Cathedral | Volumetric aurora curtains driven by psychoacoustic emitters |
+| 42 | `gravitational_lens` | Gravitational Lens Observatory | Black hole + accretion disk with relativistic effects |
+| 43 | `phonon_crystal` | Phonon Crystal Lattice | 3D phononic crystal wave propagation |
+| 44 | `cymatic_chamber` | Cymatic Resonance Chamber | 3D Chladni patterns on parallel surfaces |
+| 45 | `sonic_topology` | Sonic Topology Mapper | Manifold deformation with wireframe mesh |
+| 46 | `particle_hologram` | Acoustic Particle Hologram | Particle clusters that converge on beats and explode on kicks |
+| 47 | `freq_nebula` | Sonic Sphereworld | Planet terrain displacement with volumetric atmosphere |
 
 ## Audio Data Available to Shaders
 
@@ -82,10 +105,15 @@ Each shader receives a structured `AudioData` buffer with:
 - **Kick** — detected kick drum onset with confidence (`kick`, `kickConf`)
 - **Beat** — tempo-tracked beat phase
 - **Transient** — general transient onset detection
-- **Stereo** — balance and difference (`stereoBal`, `stereoDiff`)
+- **Stereo** — balance and difference (`stereoBal`, `stereoDiff`), stereo width (`stereoWid`)
+- **LUFS** — integrated loudness (`lufsNormalized`)
+- **Crest factor** — peak-to-RMS ratio (`crestFactorNormalized`)
+- **THD** — total harmonic distortion (`thdNormalized`)
+- **Phase coherence** — L/R phase correlation (`phaseCoherence`)
 - **Spectrum texture** — full FFT spectrum sampled via `u_spectrum`
 - **Motion** — speed, brightness, saturation, bloom controls
 - **Section/scene** — automatic scene detection for color shifts
+- **Brain palette** — 3 brain-derived colors (`brainCol`, `brainCol2`, `brainCol3`) + hue base/range/saturation
 
 ## Controls
 
@@ -131,12 +159,19 @@ Shared includes in `shaders/include/` provide:
 - `raymarch.hlsl` — Ray marching helpers, camera ray generation
 - `postfx.hlsl` — Bloom, tonemapping, vignette, scanlines
 - `audio_reactive.hlsl` — Audio-driven overlays, starfield, god rays
-- `layers.hlsl` — Blend modes, layer compositing
+- `layers.hlsl` — Blend modes, layer compositing, soft tone mapping (`softReinhard`), additive budget (`budgetPass`)
+- `dsp_cb.hlsl` — DSP metrics: LUFS, crest factor, THD, phase coherence
+- `spatial_encoder.hlsl` — 3D audio-to-spatial mapping with psychoacoustic profiles, emitter glow, L/R links, listener focal point, world environment, VR rendering
 
 To add a new mode:
 1. Create `shaders/dx_your_mode.hlsl` with a `float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target` entry point
-2. Add the mode key to the modes array and display names in `DX12Renderer.cs`
-3. Rebuild and run
+2. Include `spatial_encoder.hlsl` and `layers.hlsl` for VR spatial modes (29+)
+3. Add the mode key to the modes array and display names in `DX12Renderer.cs`
+4. Use `softReinhard(col)` instead of hard HDR clamp for tone mapping
+5. Use `seActiveCount(emit)` for additive budget normalization
+6. Rebuild and run
+
+See `VR_SPATIAL_DESIGN.md` for the full VR spatial audio design document covering psychoacoustic mapping, VR comfort guidelines, and the spatial encoder architecture.
 
 ## License
 
