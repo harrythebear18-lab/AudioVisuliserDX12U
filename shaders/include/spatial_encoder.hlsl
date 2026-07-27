@@ -665,7 +665,7 @@ float3 seWorldEnvironment(float2 p, SeCamera cam, SeWorld world,
         float3 hitPos = cam.pos + rd * tFloor;
         float2 gridUV = float2(hitPos.x * world.gridScale, -hitPos.z * world.gridScale * 0.9);
         float2 gridId = abs(frac(gridUV) - 0.5);
-        float gridLine = smoothstep(0.47, 0.5, max(gridId.x, gridId.y));
+        float gridLine = smoothstep(0.42, 0.5, max(gridId.x, gridId.y));
         float gridFade = smoothstep(0.0, 8.0, tFloor) * smoothstep(30.0, 12.0, tFloor);
         float floorMask = floorHit * float(world.flags & 1);
         col += a.brainCol * gridLine * world.gridIntensity * gridFade * floorMask * silence;
@@ -679,7 +679,7 @@ float3 seWorldEnvironment(float2 p, SeCamera cam, SeWorld world,
         float3 hitPos = cam.pos + rd * tCeil;
         float2 gridUV = float2(hitPos.x * world.gridScale, -hitPos.z * world.gridScale * 0.9);
         float2 gridId = abs(frac(gridUV) - 0.5);
-        float gridLine = smoothstep(0.47, 0.5, max(gridId.x, gridId.y));
+        float gridLine = smoothstep(0.42, 0.5, max(gridId.x, gridId.y));
         float gridFade = smoothstep(0.0, 8.0, tCeil) * smoothstep(30.0, 12.0, tCeil);
         float ceilMask = ceilHit * float(world.flags & 2);
         col += a.brainCol2 * gridLine * world.gridIntensity * 0.7 * gridFade * ceilMask * silence;
@@ -692,7 +692,7 @@ float3 seWorldEnvironment(float2 p, SeCamera cam, SeWorld world,
         float3 hitPos = cam.pos + rd * tWall;
         float2 wallUV = float2(hitPos.x * world.gridScale * 0.9, hitPos.y * world.gridScale * 0.9);
         float2 wallId = abs(frac(wallUV) - 0.5);
-        float wallLine = smoothstep(0.47, 0.5, max(wallId.x, wallId.y));
+        float wallLine = smoothstep(0.42, 0.5, max(wallId.x, wallId.y));
         float wallFade = smoothstep(0.0, 5.0, tWall) * smoothstep(30.0, 12.0, tWall);
         float wallMask = wallHit * float(world.flags & 4);
         col += a.brainCol * wallLine * world.gridIntensity * 0.6 * wallFade * wallMask * silence;
@@ -896,8 +896,7 @@ float3 seRenderWorldVR(float2 p, SeEmitter emit[SE_NUM_OBJ], SeCamera cam, SeWor
 float seActiveCount(SeEmitter emit[SE_NUM_OBJ]) {
     float count = 0.0;
     [loop] for (int i = 0; i < SE_NUM_OBJ; i++) {
-        if (emit[i].active > 0.01 && emit[i].intensity > 0.05)
-            count += 1.0;
+        count += emit[i].active * smoothstep(0.05, 0.3, emit[i].intensity);
     }
     return max(count, 1.0);
 }
@@ -908,10 +907,8 @@ float seActiveCountCulled(SeEmitter emit[SE_NUM_OBJ]) {
     [loop] for (int bi = 0; bi < SE_N_BANDS; bi++) {
         int li = bi * SE_N_SUB * 2 + 2;
         int ri = bi * SE_N_SUB * 2 + 3;
-        if (emit[li].active > 0.01 && emit[li].intensity > 0.05)
-            count += 1.0;
-        if (emit[ri].active > 0.01 && emit[ri].intensity > 0.05)
-            count += 1.0;
+        count += emit[li].active * smoothstep(0.05, 0.3, emit[li].intensity);
+        count += emit[ri].active * smoothstep(0.05, 0.3, emit[ri].intensity);
     }
     return max(count, 1.0);
 }

@@ -118,7 +118,7 @@ static class Program
                 DebugLogger.Info($"\n=== {renderer.BackendName} Renderer Ready ===");
                 DebugLogger.Info($"  M=Next Mode  N=Prev Mode  H=Toggle Brain HUD  B=Toggle Director HUD  ESC=Quit");
                 DebugLogger.Info($"  D=Cycle Director (Auto/Observe/Off)  O=Toggle Ollama  A=Toggle Auto Mode Selection");
-                DebugLogger.Info($"  G=Toggle Music AI  C=Toggle Chat (in Director HUD)");
+                DebugLogger.Info($"  G=Toggle Music AI  C=Toggle Chat (in Director HUD)  Y=Toggle VSync");
                 DebugLogger.Info($"  Work Graphs: {renderer.SupportsWorkGraphs}");
                 DebugLogger.Info($"  Mode: {renderer.CurrentMode}");
                 DebugLogger.Info($"  Auto Mode Selection: ON (LightingBrain)\n");
@@ -224,6 +224,13 @@ static class Program
                 case Keys.G:
                     if (musicAI != null) musicAI.Enabled = !musicAI.Enabled;
                     DebugLogger.Info($"MusicBrainAI: {(musicAI?.Enabled == true ? "ON" : "OFF")}");
+                    break;
+                case Keys.Y:
+                    if (dx12Renderer != null)
+                    {
+                        dx12Renderer.VSyncEnabled = !dx12Renderer.VSyncEnabled;
+                        DebugLogger.Info($"VSync: {(dx12Renderer.VSyncEnabled ? "ON" : "OFF")}");
+                    }
                     break;
                 case Keys.C:
                     if (directorHud == null || directorHud.IsDisposed)

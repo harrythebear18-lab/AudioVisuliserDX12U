@@ -112,10 +112,9 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target
     // ── Standard overlays ──
     col += standardOverlays(p, r, a) * 0.02;
 
-        // ── Active-emitter normalization — busy music doesn't stack brighter ──
-    col *= sqrt(16.0 / seActiveCount(emit));
-    // ── Soft tone mapping (Reinhard) — no hard clamp, preserves color ──
-    col = softReinhard(col);
+    // ── HDR limiter ──
+    float maxC = max(col.r, max(col.g, col.b));
+    if (maxC > 1.0) col *= 1.0 / maxC;
 
     col *= silence;
 

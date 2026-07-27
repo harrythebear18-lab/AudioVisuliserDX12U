@@ -181,6 +181,7 @@ public class DX12Renderer : IRenderer
     };
     private int _currentMode;
     private bool _shouldResetGPU = false;
+    public bool VSyncEnabled { get; set; } = true;
 
     // Dragon head mesh — deferred (requires mesh shader PSO support)
     private ID3D12PipelineState _dragonPSO = null!;
@@ -2152,6 +2153,7 @@ public class DX12Renderer : IRenderer
             _hud.CurrentModeName = _displayNames.TryGetValue(rawName, out var displayName) ? displayName : rawName;
             _hud.CurrentModeIndex = _currentMode;
             _hud.TotalModes = _modeNames.Count;
+            _hud.VSyncEnabled = VSyncEnabled;
             _hud.Render(_commandList, _lastFrame, dt);
         }
 
@@ -2162,7 +2164,7 @@ public class DX12Renderer : IRenderer
         _commandList.Close();
         _commandQueue.ExecuteCommandList(_commandList);
 
-        _swapChain.Present(1, PresentFlags.None);
+        _swapChain.Present(VSyncEnabled ? 1u : 0u, PresentFlags.None);
 
         _fenceValue++;
         _commandQueue.Signal(_fence, _fenceValue);

@@ -66,7 +66,13 @@ float audioMandelbulb(float3 p, float bands[8], float beatPulse, float kickSurge
 
         // Convert to polar
         float theta = acos(z.z / max(r, 0.001));
-        float phi = atan2(z.y, z.x);
+        float phi;
+        if (abs(z.x) > 0.001) {
+            phi = atan(z.y / z.x);
+            if (z.x < 0.0) phi += (z.y >= 0.0) ? PI : -PI;
+        } else {
+            phi = (z.y >= 0.0) ? (PI * 0.5) : -(PI * 0.5);
+        }
         dr = pow(r, power - 1.0) * power * dr + 1.0;
 
         // Scale and rotate

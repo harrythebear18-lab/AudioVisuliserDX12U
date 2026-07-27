@@ -44,6 +44,7 @@ public class DX12HUD : IDisposable
     public string CurrentModeName { get; set; } = "";
     public int CurrentModeIndex { get; set; } = 0;
     public int TotalModes { get; set; } = 0;
+    public bool VSyncEnabled { get; set; } = true;
 
     private static readonly string[] SectionNames = {
         "Unknown", "Intro", "Verse", "PreChorus", "Chorus",
@@ -243,6 +244,9 @@ public class DX12HUD : IDisposable
 
         lineList.Add($"Mode [{CurrentModeIndex + 1}/{TotalModes}]: {CurrentModeName}");
         colorList.Add(cyan);
+
+        lineList.Add($"VSync: {(VSyncEnabled ? "ON" : "OFF")}  (Y to toggle)");
+        colorList.Add(VSyncEnabled ? dim : yellow);
 
         lineList.Add($"AudioPipeline: ACTIVE (split threads)");
         colorList.Add(green);
