@@ -8,6 +8,60 @@ float3 softReinhard(float3 col) {
     return col / (1.0 + col);
 }
 
+// ── Dynamic visual brightness limiter (soft knee) ──
+// Below threshold: passes through unchanged (preserves vivid colors).
+// Above threshold: smooth compression toward ceiling, never hard clamps.
+// knee controls how gradual the transition is (0.5 = gentle, 2.0 = aggressive).
+// ceiling is the maximum output brightness (1.0 = SDR white, 1.5 = HDR bright).
+float3 hdrLimiter(float3 col, float threshold, float knee, float ceiling) {
+    float maxC = max(col.r, max(col.g, col.b));
+    if (maxC <= threshold) return col;
+    // Soft compression: above threshold, compress toward ceiling
+    float excess = maxC - threshold;
+    float compress = excess / (excess * knee + 1.0);
+    float scale = (threshold + compress) / maxC;
+    // Never exceed ceiling
+    float outMax = maxC * scale;
+    if (outMax > ceiling) scale *= ceiling / outMax;
+    return col * scale;
+}
+
+// Convenience: standard dynamic limiter (threshold 0.8, knee 1.0, ceiling 1.2)
+float3 hdrLimiter(float3 col) {
+    return hdrLimiter(col, 0.8, 1.0, 1.2);
+}
+
+// ── VR parallax shift for screen-space shapes ──
+// Fakes stereo depth by offsetting screen coords horizontally per eye.
+// depth = simulated distance of the shape (0.5 = close, 3.0 = far).
+// Returns a parallax offset to ADD to screen-space p.
+// In desktop mode returns 0 — no effect.
+float2 vrParallax(float depth) {
+    if (!VR_ACTIVE) return float2(0.0, 0.0);
+    // Eye separation: left eye sees shape shifted right, right eye shifted left
+    // Closer depth = more shift (stronger parallax)
+    float eyeSign = VR_EYE_INDEX * 2.0 - 1.0;  // -1 = left, +1 = right
+    float parallaxAmount = VR_IPD * 0.5 / max(depth, 0.3);
+    return float2(-eyeSign * parallaxAmount, 0.0);
+}
+
+// ── VR comfort: scale down flash intensity to prevent discomfort ──
+// Full intensity on desktop, reduced in VR (closer to eyes).
+float vrFlashScale() {
+    return VR_ACTIVE ? 0.5 : 1.0;
+}
+
+// ── VR comfort: reduce high-frequency flicker amplitude ──
+// THD-driven noise and transient jitter can be uncomfortable in VR.
+float vrFlickerScale() {
+    return VR_ACTIVE ? 0.4 : 1.0;
+}
+
+// ── VR comfort: clamp motion speed to prevent nausea ──
+float vrMotionScale(float speed) {
+    return VR_ACTIVE ? speed * 0.6 : speed;
+}
+
 // ── Additive budget — normalize a pass contribution by active count ──
 // Each rendering stage gets a fixed budget. Divide by active emitters so
 // busy music (many active) doesn't stack brighter than quiet music (few active).

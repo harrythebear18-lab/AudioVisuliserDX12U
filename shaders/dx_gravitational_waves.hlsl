@@ -1,179 +1,280 @@
 // RS by Resonance — RapidSpectrum Visualizer
-// HUD Mode 31: Acoustic Room Response — visualizing the impulse response of virtual space
+// HUD Mode 32: Acoustic Pressure Chamber — volumetric pressure field in a wireframe room
 // VR Layer mode. Uses spatial_encoder.hlsl with SE_PROFILE_PSYCHOACOUSTIC.
 //
-// Psychoacoustic phenomenon: The brain synthesizes room acoustics from visual context.
-// This mode makes that mental model visible — you see what the brain hears:
+// Concept: Sound fills a room as a 3D pressure field. Each emitter is a pressure
+// source whose intensity, frequency, and position are driven by the full audio brain.
+// The interference between sources creates the acoustic landscape. The room wireframe
+// responds to frequency-localized energy: bass shakes the floor, highs light the ceiling,
+// mids illuminate the walls. Between beats, envelope and band energy sustain the field.
 //
-//   Direct Sound      → sharp emitter glow at psychoacoustic source position
-//   Early Reflections → ghost sources mirrored across floor/walls (image source method)
-//   Precedence (Haas) → direct sound dominant, reflections attenuated by delay
-//   Room Modes        → standing wave patterns on floor grid (bass-driven)
-//   Reverb Tail       → diffuse ambient glow tracking energy decay (T60)
+// Audio-to-visual mapping:
+//   b0 (sub)    → floor pressure ripples + floor edge glow
+//   b1 (bass)   → floor wireframe pulse + low shockfronts
+//   b2-b5 (mids)→ wall edge glow + side pressure blobs
+//   b6-b7 (highs)→ ceiling edge glow + high pressure shimmer
+//   beat/kick   → expanding shockfronts from listener
+//   transient   → surface disruption sparks
+//   envelope    → sustained pressure field density
+//   stereoBal   → L/R asymmetric pressure distribution
+//   stereoWid   → wider field spread
+//   phaseCoh    → coherent (tight) vs diffuse (wide) field
+//   section     → room size / camera repositioning
+//   phraseBeat  → slow evolution of pressure pattern
+//   speechMode  → vocal band (b3-b5) emphasis
+//   calmMode    → reduced intensity floor
+//   brightness  → global visual scaling
+//   glow        → sustained ambient brightness
+//   colorPulse  → hue cycling
+//   beatAnt     → anticipatory swell before beats
 //
-// World: grid floor + back wall + ceiling = acoustic room, fog density 0.05, dark ambient.
-// Camera: inside the room, FOV 0.65 (VR: head pose from OpenXR).
-// 16-source culling: only center sub (si=1) renders for VR performance.
-//
-// DSP: LUFS→reverb density, crest→reflection sharpness, THD→surface roughness,
-//      phase→L/R coherence. HDR output to Layer 0. No local postfx.
+// DSP additive:
+//   LUFS→field density, crest→pressure sharpness, THD→surface roughness,
+//   phase→L/R coherence. HDR output to Layer 0. No local postfx.
 
 #include "include/spatial_encoder.hlsl"
 #include "include/layers.hlsl"
 
 #define PI 3.14159265
 
-// ── Room dimensions — virtual acoustic space ──
-#define ROOM_HALF_W 3.0   // half-width  (X: -3..+3)
-#define ROOM_CEIL   2.5   // ceiling     (Y: +2.5)
-#define ROOM_FLOOR -1.5   // floor       (Y: -1.5)
-#define ROOM_BACK  -5.0   // back wall   (Z: -5.0)
+// ── Room dimensions ──
+#define ROOM_HALF_W 3.0
+#define ROOM_CEIL   2.5
+#define ROOM_FLOOR -1.5
+#define ROOM_BACK  -5.0
 
-// ── Image source method: reflect position across a plane ──
-// P_ghost = P_src - 2 * ((P_src - P0) . N) * N
-float3 reflectAcrossPlane(float3 src, float3 planePoint, float3 planeNormal)
+// ── Room wireframe — 12 edges, each driven by frequency-localized energy ──
+float3 roomWireframe(float2 p, SeCamera cam, AudioData a,
+                     float envelope, float lufs, float kickSurge,
+                     float beatPulse, float silence)
 {
-    return src - 2.0 * dot(src - planePoint, planeNormal) * planeNormal;
-}
-
-// ── Early reflection ghost — mirrored emitter with frequency-dependent absorption ──
-// Visualizes the Haas effect: reflections are dimmer, blurred, and delayed.
-float3 earlyReflection(float2 p, SeEmitter e, SeCamera cam, SeWorld world,
-                       float3 planePoint, float3 planeNormal, float absorption,
-                       float lufs, float silence)
-{
-    if (e.active < 0.01 || e.intensity < 0.05) return float3(0, 0, 0);
-
-    // Mirror source position across the plane (image source method)
-    float3 ghostPos = reflectAcrossPlane(e.worldPos, planePoint, planeNormal);
-
-    // Project ghost to screen space
-    float ghostDepth = seDepth(ghostPos, cam);
-    if (ghostDepth < 0.1) return float3(0, 0, 0);
-    float2 ghostScreen = seProject(ghostPos, cam);
-
-    // Distance from pixel to ghost
-    float2 diff = p - ghostScreen;
-    float d2 = dot(diff, diff);
-    float s = e.screenSize * 1.5;  // reflections are broader (blurred)
-    float s2 = s * s;
-    if (d2 > s2 * 30.0) return float3(0, 0, 0);
-
-    // Haas effect: attenuation by propagation delay (extra distance traveled)
-    float directDist = length(e.worldPos - cam.pos);
-    float ghostDist = length(ghostPos - cam.pos);
-    float delayDist = ghostDist - directDist;
-    float haasAtten = exp(-delayDist * 0.3);  // e^(-alpha * delta_t)
-
-    // Frequency-dependent absorption — highs absorbed more by surfaces
-    float bandFrac = float(e.bandIdx) / 7.0;
-    float freqAbsorb = lerp(0.9, 0.3, bandFrac);  // bass passes through, highs absorbed
-    float surfaceAbsorb = absorption * freqAbsorb;
-
-    // Depth fog for ghost
-    float ghostFog = exp(-ghostDist * world.fogDensity);
-
-    // Reflection amplitude: direct intensity * Haas * absorption * fog
-    float amp = e.intensity * haasAtten * surfaceAbsorb * ghostFog;
-
-    // Blurred glow — reflections are diffuse, not sharp
-    float halo = exp(-d2 / (s2 * 6.0));
-    float mid = exp(-d2 / (s2 * 2.0));
-
-    // Desaturate reflection color (high-frequency loss = less color)
-    float lum = dot(e.color, float3(0.299, 0.587, 0.114));
-    float3 ghostCol = lerp(float3(lum, lum, lum), e.color, freqAbsorb);
-
     float3 col = float3(0, 0, 0);
-    col += ghostCol * halo * amp * 0.05 * silence;
-    col += ghostCol * mid * amp * 0.03 * silence;
 
-    // Kick impulse — bright reflection flash on bass bands
-    if (e.bandIdx <= 1 && e.intensity > 0.3) {
-        col += float3(1.0, 0.5, 0.15) * mid * amp * 0.04 * silence;
+    float3 c000 = float3(-ROOM_HALF_W, ROOM_FLOOR, 0.0);
+    float3 c100 = float3( ROOM_HALF_W, ROOM_FLOOR, 0.0);
+    float3 c010 = float3(-ROOM_HALF_W, ROOM_CEIL,  0.0);
+    float3 c110 = float3( ROOM_HALF_W, ROOM_CEIL,  0.0);
+    float3 c001 = float3(-ROOM_HALF_W, ROOM_FLOOR, ROOM_BACK);
+    float3 c101 = float3( ROOM_HALF_W, ROOM_FLOOR, ROOM_BACK);
+    float3 c011 = float3(-ROOM_HALF_W, ROOM_CEIL,  ROOM_BACK);
+    float3 c111 = float3( ROOM_HALF_W, ROOM_CEIL,  ROOM_BACK);
+
+    float3 edges[12][2] = {
+        {c000, c100}, {c010, c110}, {c001, c101}, {c011, c111},
+        {c000, c010}, {c100, c110}, {c001, c011}, {c101, c111},
+        {c000, c001}, {c100, c101}, {c010, c011}, {c110, c111}
+    };
+
+    // Frequency-localized energy for each surface
+    float floorE = (a.b0 + a.b1) * 0.5 * (1.0 + lufs * 0.3);
+    float ceilE  = (a.b6 + a.b7) * 0.5 * (1.0 + lufs * 0.2);
+    float wallE  = (a.b2 + a.b3 + a.b4 + a.b5) * 0.25;
+    // Speech mode boosts vocal bands on walls
+    wallE *= (1.0 + a.speechMode * 0.4);
+    // Glow modifier sustains edge brightness
+    float glowMod = a.glow * 0.3 + a.brightness * 0.2;
+    // Phrase evolution slowly shifts which surfaces are emphasized
+    float phraseShift = sin(a.phraseBeat * PI * 2.0) * 0.15;
+
+    [unroll] for (int i = 0; i < 12; i++) {
+        float2 a0 = seProject(edges[i][0], cam);
+        float2 a1 = seProject(edges[i][1], cam);
+
+        float2 ab = a1 - a0;
+        float len2 = dot(ab, ab);
+        if (len2 < 0.0001) continue;
+        float t = saturate(dot(p - a0, ab) / len2);
+        float2 closest = a0 + ab * t;
+        float dist = length(p - closest);
+
+        // Thin bright line with slight bloom
+        float lineIntensity = exp(-dist * dist * 600.0);
+
+        // Depth fade
+        float3 midPoint = lerp(edges[i][0], edges[i][1], 0.5);
+        float depth = seDepth(midPoint, cam);
+        float depthFade = exp(-depth * 0.06);
+
+        // Energy by surface type
+        float energy;
+        float3 edgeCol;
+        if (i < 4) {
+            // Floor/ceiling X edges — split by Y
+            if (edges[i][0].y < 0.0) {
+                energy = floorE + kickSurge * 0.5;
+                edgeCol = a.brainCol; // warm = floor/bass
+            } else {
+                energy = ceilE + a.b7 * 0.3;
+                edgeCol = a.brainCol3; // cool = ceiling/highs
+            }
+        } else if (i < 8) {
+            // Vertical edges — wall energy
+            energy = wallE + phraseShift * wallE;
+            edgeCol = a.brainCol2; // mid = walls
+        } else {
+            // Depth edges — mixed
+            energy = wallE * 0.6 + floorE * 0.2 + ceilE * 0.2;
+            edgeCol = lerp(a.brainCol, a.brainCol3, 0.5);
+        }
+
+        // Beat pulse brightens all edges
+        energy += beatPulse * 0.3 * envelope;
+        // Sustained glow
+        energy += glowMod;
+        // Calm mode reduces floor
+        energy *= (1.0 - a.calmMode * 0.3);
+
+        col += edgeCol * lineIntensity * energy * depthFade * 0.2 * silence;
     }
 
     return col;
 }
 
-// ── Room mode standing wave pattern on floor grid ──
-// P(x,y) = cos(n_x * pi * x / L_x) * cos(n_y * pi * y / L_y) * BassEnergy
-float3 roomModePattern(float2 p, SeCamera cam, SeWorld world, AudioData a,
-                       float kickSurge, float silence)
+// ── Pressure field — 16-source culled emitters as volumetric blobs ──
+// Each emitter contributes a soft pressure region. Interference = additive overlap.
+// This is distinct from mode 31's ILD beams — here we render the field itself.
+float3 pressureField(float2 p, SeEmitter emit[SE_NUM_OBJ], SeWorld world,
+                     float lufs, float crest, float beatPulse, float beatPhase,
+                     float kickSurge, float transientAmt, float silence)
 {
     float3 col = float3(0, 0, 0);
 
-    // Raycast to floor
+    [loop] for (int bi = 0; bi < SE_N_BANDS; bi++) {
+        int li = bi * SE_N_SUB * 2 + 2;  // si=1, left (16-source culling)
+        int ri = bi * SE_N_SUB * 2 + 3;  // si=1, right
+
+        // Left pressure blob
+        if (emit[li].active > 0.01 && emit[li].depth > 0.1) {
+            float2 diff = p - emit[li].screenPos;
+            float d2 = dot(diff, diff);
+            float s = emit[li].screenSize;
+            float s2 = s * s;
+            if (d2 < s2 * 40.0) {
+                // Soft pressure blob — two layers
+                float halo = exp(-d2 / (s2 * 10.0));
+                float core = exp(-d2 / (s2 * 1.5));
+
+                // Intensity from emitter (already enriched with beatAnt, punch, glow, phrase, speech)
+                float intensity = emit[li].intensity * emit[li].depthFog * emit[li].nearFade;
+                // Crest sharpens the core (dynamic range = sharper sources)
+                float coreSharp = core * (0.5 + crest * 0.5);
+                // LUFS boosts overall field density
+                intensity *= (1.0 + lufs * 0.2);
+
+                col += emit[li].color * halo * intensity * 0.08 * silence;
+                col += emit[li].color * coreSharp * intensity * 0.15 * silence;
+
+                // Kick flash on bass bands
+                if (bi <= 1) {
+                    col += float3(1.0, 0.5, 0.15) * core * kickSurge * intensity * 0.1 * silence;
+                }
+                // Transient scatter on mid/high bands
+                if (bi >= 4 && transientAmt > 0.1) {
+                    col += emit[li].color * core * transientAmt * intensity * 0.08 * silence;
+                }
+                // Beat pulse ring from each source
+                float beatR = beatPhase * s * 5.0;
+                float beatRing = exp(-abs(sqrt(d2) - beatR) * 40.0 / emit[li].depth);
+                col += emit[li].color * beatRing * beatPulse * intensity * 0.04 * silence;
+            }
+        }
+
+        // Right pressure blob (same logic)
+        if (emit[ri].active > 0.01 && emit[ri].depth > 0.1) {
+            float2 diff = p - emit[ri].screenPos;
+            float d2 = dot(diff, diff);
+            float s = emit[ri].screenSize;
+            float s2 = s * s;
+            if (d2 < s2 * 40.0) {
+                float halo = exp(-d2 / (s2 * 10.0));
+                float core = exp(-d2 / (s2 * 1.5));
+
+                float intensity = emit[ri].intensity * emit[ri].depthFog * emit[ri].nearFade;
+                float coreSharp = core * (0.5 + crest * 0.5);
+                intensity *= (1.0 + lufs * 0.2);
+
+                col += emit[ri].color * halo * intensity * 0.08 * silence;
+                col += emit[ri].color * coreSharp * intensity * 0.15 * silence;
+
+                if (bi <= 1) {
+                    col += float3(1.0, 0.5, 0.15) * core * kickSurge * intensity * 0.1 * silence;
+                }
+                if (bi >= 4 && transientAmt > 0.1) {
+                    col += emit[ri].color * core * transientAmt * intensity * 0.08 * silence;
+                }
+                float beatR = beatPhase * s * 5.0;
+                float beatRing = exp(-abs(sqrt(d2) - beatR) * 40.0 / emit[ri].depth);
+                col += emit[ri].color * beatRing * beatPulse * intensity * 0.04 * silence;
+            }
+        }
+    }
+
+    return col;
+}
+
+// ── Floor pressure ripples — bass-driven standing waves on floor grid ──
+float3 floorRipples(float2 p, SeCamera cam, AudioData a, float kickSurge,
+                    float beatPulse, float beatPhase, float silence)
+{
+    float3 col = float3(0, 0, 0);
     float3 rd = normalize(cam.fwd + p.x * cam.right * cam.fov + p.y * cam.up * cam.fov);
     float tFloor = (ROOM_FLOOR - cam.pos.y) / (rd.y + 1e-5);
     if (tFloor <= 0.0 || tFloor > 30.0) return col;
 
     float3 hitPos = cam.pos + rd * tFloor;
-    float2 floorCoord = hitPos.xz;
+    float2 fc = hitPos.xz;
+    if (abs(fc.x) > ROOM_HALF_W || fc.y > 0.0 || fc.y < ROOM_BACK) return col;
 
-    // Only within room bounds
-    if (abs(floorCoord.x) > ROOM_HALF_W || floorCoord.y > 0.0 || floorCoord.y < ROOM_BACK)
-        return col;
+    float r = length(fc);
+    float bassE = (a.b0 + a.b1) * 0.5;
 
-    // Normalize to room dimensions
-    float nx = floorCoord.x / ROOM_HALF_W;  // -1..1
-    float nz = floorCoord.y / ROOM_BACK;     // 0..1 (0=front, 1=back)
+    // Standing wave pattern — bass modes
+    float mode1 = cos(fc.x * PI * 0.5) * cos(fc.y * PI * 0.3);
+    float mode2 = cos(fc.x * PI * 1.0) * cos(fc.y * PI * 0.6);
+    float modalPressure = (mode1 * 0.6 + mode2 * 0.4) * bassE;
 
-    // Bass energy drives modal intensity
-    float bassEnergy = a.b0 * 0.5 + a.b1 * 0.3 + a.energy * 0.2;
-    if (bassEnergy < 0.05) return col;
+    // Beat ripple — expanding ring from center
+    float beatR = beatPhase * 3.0;
+    float beatRing = exp(-abs(r - beatR) * 8.0) * beatPulse * 0.5;
 
-    // Room modes — axial modes in X and Z
-    // Mode numbers shift with section changes (different "rooms")
-    float modeShift = a.section * 0.5;
-    float mode1X = cos((1.0 + modeShift) * PI * nx);
-    float mode2X = cos((2.0 + modeShift) * PI * nx);
-    float mode1Z = cos((1.0 + modeShift) * PI * nz);
-    float mode2Z = cos((2.0 + modeShift) * PI * nz);
+    // Kick — central eruption
+    float kickRipple = exp(-r * r * 2.0) * kickSurge * 0.8;
 
-    // Combine modal patterns — interference creates nodes/antinodes
-    float modalPressure = (mode1X * mode1Z * 0.4 + mode2X * mode2Z * 0.3
-                          + mode1X * mode2Z * 0.15 + mode2X * mode1Z * 0.15);
-    modalPressure *= bassEnergy;
-
-    // Kick excites room modes — transient energy burst
-    modalPressure += kickSurge * mode1X * mode1Z * 0.3;
-
-    // Grid lines on floor
-    float2 gridUV = float2(hitPos.x * world.gridScale, -hitPos.z * world.gridScale * 0.9);
+    // Grid lines
+    float2 gridUV = float2(fc.x * 2.5, -fc.y * 2.0);
     float2 gridId = abs(frac(gridUV) - 0.5);
-    float gridLine = smoothstep(0.47, 0.5, max(gridId.x, gridId.y));
+    float gridLine = smoothstep(0.4, 0.5, max(gridId.x, gridId.y));
+    float gridFade = smoothstep(0.0, 5.0, tFloor) * smoothstep(25.0, 8.0, tFloor);
 
-    // Depth fade
-    float gridFade = smoothstep(0.0, 8.0, tFloor) * smoothstep(30.0, 12.0, tFloor);
+    // Pressure modulates grid brightness
+    float pressureGlow = abs(modalPressure) * 0.15 + beatRing + kickRipple;
+    col += a.brainCol * gridLine * 0.04 * gridFade * silence;
+    col += a.brainCol * pressureGlow * gridLine * 0.15 * gridFade * silence;
+    col += a.brainCol2 * pressureGlow * 0.03 * gridFade * silence; // fill between lines
 
-    // Modal pressure modulates grid brightness — antinodes glow, nodes stay dark
-    float modeIntensity = abs(modalPressure) * 0.08;
-    col += a.brainCol * gridLine * world.gridIntensity * gridFade * silence;
-    col += a.brainCol * modeIntensity * gridFade * silence;  // modal glow between lines
-    col += a.brainCol2 * gridLine * abs(modalPressure) * 0.06 * gridFade * silence;
-
-    // Kick — floor vibration
-    col += float3(1.0, 0.5, 0.15) * gridLine * kickSurge * 0.04 * gridFade * silence;
+    // Kick warm flash
+    col += float3(1.0, 0.5, 0.15) * kickRipple * gridLine * 0.1 * gridFade * silence;
 
     return col;
 }
 
-// ── Diffuse reverb tail — volumetric ambient glow tracking T60 decay ──
-float3 reverbTail(float2 p, float r, SeCamera cam, SeWorld world, AudioData a,
-                  float envelope, float lufs, float silence)
+// ── Reverb field — diffuse ambient from envelope + band energy ──
+float3 reverbField(float2 p, float r, AudioData a, float envelope, float lufs,
+                   float phaseCoh, float silence)
 {
-    // Reverb density follows envelope (sustained energy = dense reverb)
-    float reverbDensity = envelope * (0.5 + lufs * 0.3);
+    // Dense reverb from envelope + LUFS
+    float reverbDensity = envelope * (0.4 + lufs * 0.4);
+    // Diffuse field is wider when phase is decorrelated
+    float diffuseWidth = lerp(0.8, 1.5, 1.0 - phaseCoh);
 
-    // Diffuse glow — no spatial structure, just ambient field
-    // Falloff from center (listener position) — reverb is everywhere but denser near sources
-    float3 col = a.brainCol2 * reverbDensity * 0.008 * exp(-r * 1.5) * silence;
-    col += a.brainCol3 * reverbDensity * 0.005 * exp(-r * 3.0) * silence;
-
-    // High-frequency reverb shimmer — decays faster (air absorption)
-    float hfReverb = (a.b6 * 0.3 + a.b7 * 0.2) * envelope;
-    col += a.brainCol * hfReverb * 0.003 * exp(-r * 4.0) * silence;
+    float3 col = a.brainCol2 * reverbDensity * 0.012 * exp(-r * r * 0.3 * diffuseWidth) * silence;
+    // High-freq reverb shimmer — decays faster
+    float trebleE = (a.b6 + a.b7) * 0.5;
+    col += a.brainCol3 * trebleE * reverbDensity * 0.006 * exp(-r * r * 0.8) * silence;
+    // Glow sustents ambient
+    col += a.brainCol * a.glow * 0.004 * exp(-r * r * 0.2) * silence;
+    // Calm mode adds quiet ambient
+    col += a.brainCol3 * a.calmMode * a.ambientLevel * 0.003 * silence;
 
     return col;
 }
@@ -190,33 +291,33 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target
     float crest = crestFactorNormalized();
     float thd = thdNormalized();
     float phaseCoh = phaseCoherence();
-    float phaseCorr = phaseCoherence();
 
-    // ── Audio dynamics ──
+    // ── Audio dynamics — full brain data ──
     float beatPulse = a.beat * a.tempoConf;
     float kickSurge = a.kick * a.kickConf * exp(-a.beatPhase * 3.0);
     float transientAmt = a.transient;
     float envelope = a.envelope;
-    float beatBright = a.beat * a.tempoConf;
 
-    // ── Camera — VR head pose or desktop orbit inside the room ──
+    // ── Camera — VR head pose or desktop orbit ──
     SeCamera cam;
     if (VR_ACTIVE) {
         cam = seCameraVR();
     } else {
-        float FOV = 0.9;
-        float camAng = a.section * 0.15 + a.stereoBal * 0.08 + Time * 0.005 * a.motSpeed;
-        float3 camPos = float3(sin(camAng) * 3.0, 1.0 + a.stereoDiff * 0.1, 3.5 + cos(camAng) * 1.0);
-        cam = seCamera(camPos, float3(0, 0, -2.0), FOV);
+        float FOV = 0.75;
+        // Section drives camera repositioning, stereoBal for L/R lean
+        float camAng = a.section * 0.15 + a.stereoBal * 0.08 + Time * 0.003 * a.motSpeed;
+        float3 camPos = float3(sin(camAng) * 2.5, 0.5 + a.stereoDiff * 0.15, 2.0 + cos(camAng) * 0.8);
+        cam = seCamera(camPos, float3(0, 0, -2.5), FOV);
     }
 
     // ── Spatial encoder: PSYCHOACOUSTIC profile ──
-    // Azimuth = stereo pan, elevation = frequency band, distance = energy
     SeParams params = seParams(SE_PROFILE_PSYCHOACOUSTIC);
-    params.widthScale = 2.5;
+    params.widthScale = 2.5 + a.stereoWid * 0.5;  // stereo width widens room
     params.heightScale = 2.0;
-    params.depthScale = 4.0;
+    params.depthScale = 4.0 - a.calmMode * 0.5;   // calm mode compresses depth
     params.jitterAmt = 0.1 + thd * 0.15;
+    params.stereoWid = a.stereoWid;
+    params.stereoBal = a.stereoBal;
 
     float bands[8] = { a.b0, a.b1, a.b2, a.b3, a.b4, a.b5, a.b6, a.b7 };
 
@@ -225,106 +326,47 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target
                       lufs, crest, thd, phaseCoh,
                       beatPulse, kickSurge, transientAmt, envelope);
 
-    // ── World environment — acoustic room (floor + ceiling + back wall) ──
-    SeWorld world = seWorld(0.05, float3(0.003, 0.002, 0.008), ROOM_FLOOR, ROOM_CEIL, ROOM_BACK);
-    world.gridScale = 2.0;
-    world.gridIntensity = 0.03;
-    world.ambientLevel = 0.004;
-    world.ambientColor = float3(0.01, 0.008, 0.02);
+    // ── World environment ──
+    SeWorld world = seWorld(0.06, float3(0.003, 0.002, 0.008), ROOM_FLOOR, ROOM_CEIL, ROOM_BACK);
+    world.gridScale = 2.5;
+    world.gridIntensity = 0.025;
+    world.ambientLevel = 0.003 + a.calmMode * 0.002;
+    world.ambientColor = float3(0.008, 0.006, 0.015);
     world.flags = 7;  // floor + ceiling + back wall
     seApplyWorldFog(emit, world);
 
-    // ── Background — room environment + room mode patterns on floor ──
+    // ── Background: room environment + starfield ──
     float3 col = seWorldEnvironment(p, cam, world, a, kickSurge, silence);
-    col += roomModePattern(p, cam, world, a, kickSurge, silence);
+    col += starfield(uv, a) * 0.003;
 
-    // ── Early reflections — image source method (16-source culling) ──
-    // Reflect emitters across floor, ceiling, back wall, and side walls
-    // Surface absorption: floor=0.7, ceiling=0.6, back=0.5, sides=0.4
-    // THD increases surface roughness (more scattering, less specular reflection)
-    float surfaceRough = 1.0 - thd * 0.2;
+    // ── PRIMARY: Pressure field — 16-source volumetric blobs with interference ──
+    col += pressureField(p, emit, world, lufs, crest, beatPulse, a.beatPhase,
+                         kickSurge, transientAmt, silence) * 3.0;
 
-    [loop] for (int bi = 0; bi < SE_N_BANDS; bi++) {
-        int li = bi * SE_N_SUB * 2 + 2;  // si=1, left (16-source culling)
-        int ri = bi * SE_N_SUB * 2 + 3;  // si=1, right
+    // ── PRIMARY: Room wireframe — frequency-localized edge glow ──
+    col += roomWireframe(p, cam, a, envelope, lufs, kickSurge, beatPulse, silence) * 2.5;
 
-        // Floor reflection
-        if (emit[li].active > 0.01 && emit[li].depth > 0.1)
-            col += earlyReflection(p, emit[li], cam, world,
-                float3(0, ROOM_FLOOR, 0), float3(0, 1, 0), 0.7 * surfaceRough, lufs, silence);
-        if (emit[ri].active > 0.01 && emit[ri].depth > 0.1)
-            col += earlyReflection(p, emit[ri], cam, world,
-                float3(0, ROOM_FLOOR, 0), float3(0, 1, 0), 0.7 * surfaceRough, lufs, silence);
+    // ── SECONDARY: Floor pressure ripples — bass standing waves ──
+    col += floorRipples(p, cam, a, kickSurge, beatPulse, a.beatPhase, silence) * 2.0;
 
-        // Ceiling reflection
-        if (emit[li].active > 0.01 && emit[li].depth > 0.1)
-            col += earlyReflection(p, emit[li], cam, world,
-                float3(0, ROOM_CEIL, 0), float3(0, -1, 0), 0.6 * surfaceRough, lufs, silence);
-        if (emit[ri].active > 0.01 && emit[ri].depth > 0.1)
-            col += earlyReflection(p, emit[ri], cam, world,
-                float3(0, ROOM_CEIL, 0), float3(0, -1, 0), 0.6 * surfaceRough, lufs, silence);
-
-        // Back wall reflection
-        if (emit[li].active > 0.01 && emit[li].depth > 0.1)
-            col += earlyReflection(p, emit[li], cam, world,
-                float3(0, 0, ROOM_BACK), float3(0, 0, 1), 0.5 * surfaceRough, lufs, silence);
-        if (emit[ri].active > 0.01 && emit[ri].depth > 0.1)
-            col += earlyReflection(p, emit[ri], cam, world,
-                float3(0, 0, ROOM_BACK), float3(0, 0, 1), 0.5 * surfaceRough, lufs, silence);
-    }
-
-    // ── Direct sound — emitter glow (primary visual, 16-source culling) ──
-    // Precedence effect: direct sound is sharp and bright, reflections are dim/blurry
-    if (VR_ACTIVE) {
-        float3 headPos = float3(VRHeadPos.xyz);
-        [loop] for (int bi = 0; bi < SE_N_BANDS; bi++) {
-            int li = bi * SE_N_SUB * 2 + 2;
-            int ri = bi * SE_N_SUB * 2 + 3;
-            if (emit[li].active > 0.01 && emit[li].depth > 0.1)
-                col += seEmitGlowVR(p, emit[li], world, headPos, silence);
-            if (emit[ri].active > 0.01 && emit[ri].depth > 0.1)
-                col += seEmitGlowVR(p, emit[ri], world, headPos, silence);
-        }
-    } else {
-        [loop] for (int bi = 0; bi < SE_N_BANDS; bi++) {
-            int li = bi * SE_N_SUB * 2 + 2;
-            int ri = bi * SE_N_SUB * 2 + 3;
-            if (emit[li].active > 0.01 && emit[li].depth > 0.1)
-                col += seEmitGlowDepth(p, emit[li], world, lufs, crest, beatBright,
-                                       a.beatPhase, kickSurge, transientAmt, silence);
-            if (emit[ri].active > 0.01 && emit[ri].depth > 0.1)
-                col += seEmitGlowDepth(p, emit[ri], world, lufs, crest, beatBright,
-                                       a.beatPhase, kickSurge, transientAmt, silence);
-        }
-    }
-
-    // ── L↔R links — phase coherence beams ──
-    [loop] for (int lb = 0; lb < SE_N_BANDS; lb++) {
-        col += seLinkLR(p, emit, lb, phaseCorr, phaseCoh, silence);
-    }
+    // ── SECONDARY: Reverb field — diffuse ambient from envelope + bands ──
+    col += reverbField(p, r, a, envelope, lufs, phaseCoh, silence);
 
     // ── Listener focal point — spatial anchor ──
     col += seListener(p, cam, a, beatPulse, kickSurge, silence);
 
-    // ── Diffuse reverb tail — T60 decay glow ──
-    col += reverbTail(p, r, cam, world, a, envelope, lufs, silence);
-
-    // ── Ambient energy — minimal ──
-    col += a.brainCol3 * a.colorPulse * 0.01 * silence;
-    col += a.brainCol * a.energy * 0.005 * silence;
-    col += a.brainCol2 * a.punch * 0.005 * silence;
-    col += a.brainCol * a.beatAnt * 0.008 * exp(-r * 2.0) * silence;
-
-    // ── Dynamic range — quiet passages dark ──
-    col *= (0.3 + a.gated * 0.7);
+    // ── Dynamic range — quiet passages dark, gated ──
+    col *= (0.25 + a.gated * 0.75);
 
     // ── Standard overlays (sparing) ──
     col += standardOverlays(p, r, a) * 0.02;
 
-        // ── Active-emitter normalization — busy music doesn't stack brighter ──
+    // ── Active-emitter normalization ──
     col *= sqrt(16.0 / seActiveCount(emit));
-    // ── Soft tone mapping (Reinhard) — no hard clamp, preserves color ──
-    col = softReinhard(col);
+
+    // ── HDR limiter per pipeline rules ──
+    float maxC = max(col.r, max(col.g, col.b));
+    if (maxC > 1.2) col *= 1.2 / maxC;
 
     col *= silence;
 

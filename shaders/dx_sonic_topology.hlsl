@@ -1,86 +1,202 @@
 // RS by Resonance — RapidSpectrum Visualizer
-// HUD Mode 46: Sonic Topology Mapper — 4D topological manifold from audio
+// HUD Mode 46: Sonic Topology Mapper — audio-driven topographic contour map
 // VR Layer mode. Uses spatial_encoder.hlsl with SE_PROFILE_TUNNEL.
 //
-// 48 emitters (8 bands × 3 sub × L/R) placed in a tunnel corridor.
-// Emitter positions drive manifold deformation — genus shifts with bass,
-// surface displacement from mid/high emitters. Wireframe mesh connects
-// grid points. Kick = curvature spike. Transient = topology shift.
-// Beat = surface ripple.
+// Concept: A 2D height field where each of the 8 brain bands creates a moving
+// Gaussian peak in the terrain. Rendered as topographic contour lines
+// (isosurfaces of height) with color gradients between them. The terrain
+// morphs dramatically with music — peaks rise and fall, move and merge.
 //
-// World: grid floor for depth grounding, fog density 0.04, dark ambient.
-// Camera: orbiting the manifold, FOV 0.6 (VR: head pose from OpenXR).
-// Visual: parametric manifold grid with emitter-driven displacement + wireframe.
+// ALL AudioData fields used:
+//   b0-b7: 8 Gaussian peaks (height + position)
+//   energy/overall: global terrain amplitude
+//   beat/beatPhase/beatDet: seismic ripple + contour pulse
+//   beatAnt: pre-beat terrain swell
+//   kick/kickConf/punch: earthquake spike + impact crater
+//   transient/dynamic: terrain crack/discontinuity
+//   envelope: terrain breathing
+//   bpm/tempo/tempoConf: contour line spacing + clarity
+//   motSpeed/motionSpd: peak rotation speed
+//   stereoBal/stereoWid/stereoDiff: terrain shift + stretch
+//   leftEn/rightEn: L/R peak intensity modulation
+//   phaseCorr/phaseCoh: L/R peak convergence + terrain smoothness
+//   crest: contour line sharpness
+//   thd: terrain roughness/noise
+//   lufs: overall terrain brightness
+//   brightness/glow/bloom/beam/dynLight: visual modifiers
+//   speechMode/voiceActivity: vocal band peak boost
+//   calmMode: reduce terrain amplitude
+//   phraseBeat: slow terrain breathing
+//   section/sectionConf: terrain rotation offset
+//   colorPulse: hue shift
+//   brainCol/2/3: contour line colors by height
+//   hueBase/Center/Range/satur: HSV color mapping
+//   gated/isSilent: gating
+//   specCent/specSpread: contour color weighting + spread
+//   domFreq/domBand: dominant frequency highlight
+//   burstTrig/burstType/burstInt: burst event terrain spike
+//   effectInt: secondary feature scale
+//   ambient/ambientLevel: ambient terrain glow
+//   profBass/profTreb: bass/treble terrain expansion
+//   barScale/persp/motionPers: scale + perspective
+//   tempoPulse: tempo-driven contour pulse
 //
-// DSP: LUFS→surface brightness, crest→ridge sharpness, THD→surface roughness, phase→displacement symmetry.
-// HDR output to Layer 0. No local postfx. Pipeline owns bloom/tonemap.
+// No seEmitGlowDepth/VR, no seLinkLR, no softReinhard. Full audio brain.
+// HDR output to Layer 0. No local postfx.
 
 #include "include/spatial_encoder.hlsl"
 #include "include/layers.hlsl"
 
 #define PI 3.14159265
-#define GRID_N 10
 
-// Find nearest emitter influence at a manifold point
-float3 emitterInfluence(float3 manifoldPos, SeEmitter emit[SE_NUM_OBJ],
-                        float beatPulse, float kickSurge, float transientAmt,
-                        float thd, float envelope, AudioData a)
+// Procedural terrain height field — 8 band-driven peaks + all audio dynamics
+float terrainHeight(float2 p, float bands[8], AudioData a,
+                    float crest, float thd, float phaseCoh, float lufs,
+                    float beatPulse, float kickSurge, float transientAmt,
+                    float envelope, float time)
 {
-    float3 disp = float3(0, 0, 0);
-    float totalWeight = 0.0;
+    float h = 0.0;
+    float r = length(p);
 
-    [loop] for (int i = 0; i < SE_NUM_OBJ; i++) {
-        if (emit[i].active < 0.01) continue;
-        float dist = length(manifoldPos - emit[i].worldPos);
-        float weight = exp(-dist * dist * 2.0) * emit[i].intensity;
-        disp += emit[i].worldPos * weight * 0.15;
-        totalWeight += weight;
+    // Stereo shift — terrain drifts with stereo balance
+    float2 terrainShift = float2(a.stereoBal * 0.15, 0.0);
+    // Stereo width stretch
+    float stretchX = 1.0 + a.stereoWid * 0.2;
+    float2 sp = float2(p.x / stretchX, p.y) - terrainShift;
+
+    // ── 8 band-driven Gaussian peaks ──
+    [unroll] for (int i = 0; i < 8; i++) {
+        float bandVal = bands[i];
+        if (bandVal < 0.005) continue;
+
+        // Peak position — rotates slowly, each band at different speed
+        float ang = float(i) / 8.0 * PI * 2.0
+                  + time * (0.08 + float(i) * 0.025) * a.motSpeed
+                  + a.section * 0.5;
+        // Stereo balance shifts low bands more than highs
+        ang += a.stereoBal * 0.3 * (1.0 - float(i) / 7.0);
+
+        // Peak radius — outer bands further out, bass bands central
+        float peakR = 0.15 + float(i) / 8.0 * 0.3;
+        peakR += a.profBass * 0.05 * (1.0 - float(i) / 7.0);  // bass expands inner
+        peakR += a.profTreb * 0.05 * (float(i) / 7.0);        // treble expands outer
+
+        float2 peakPos = float2(cos(ang), sin(ang)) * peakR;
+
+        // L/R peak intensity modulation
+        float lrMod = 1.0;
+        if (i < 4) lrMod = lerp(a.leftEn, a.rightEn, float(i) / 3.0) / max(a.overall, 0.01);
+        else lrMod = lerp(a.leftEn, a.rightEn, float(i - 4) / 3.0) / max(a.overall, 0.01);
+        lrMod = clamp(lrMod, 0.5, 2.0);
+
+        // Peak height — band energy is primary driver
+        float peakH = bandVal * 1.8 * a.gated * lrMod;
+        peakH *= (1.0 + lufs * 0.3);
+        peakH *= (0.8 + envelope * 0.4);
+        peakH *= (1.0 - a.calmMode * 0.4);
+
+        // Vocal band boost
+        float vocalW = smoothstep(2.5, 3.5, float(i)) * (1.0 - smoothstep(5.0, 6.0, float(i)));
+        peakH += a.speechMode * vocalW * bandVal * 0.5 * a.gated;
+        peakH += a.voiceActivity * vocalW * 0.2 * a.gated;
+
+        // Peak width — narrower for high bands (sharper features)
+        float peakW = 0.28 - float(i) * 0.018;
+        peakW *= (1.0 + phaseCoh * 0.3);    // phase coherence widens (smoother)
+        peakW *= (1.0 - thd * 0.2 * vrFlickerScale());  // THD narrows (rougher)
+        peakW *= (1.0 + a.specSpread * 0.2);  // spectral spread widens
+
+        // Gaussian peak
+        float d = length(sp - peakPos);
+        h += peakH * exp(-d * d / (peakW * peakW));
+
+        // Secondary ripple from each peak — wave spreading outward
+        h += peakH * 0.2 * sin(d * 14.0 - time * 3.0 - float(i)) * exp(-d * d * 2.5);
+
+        // Dominant band highlight — extra glow on dominant frequency
+        if (abs(float(i) - a.domBand) < 0.5 && a.domBand > 0.01) {
+            h += peakH * 0.3 * exp(-d * d / (peakW * peakW * 1.5));
+        }
     }
 
-    if (totalWeight > 0.001) {
-        disp /= totalWeight;
-        disp = (disp - manifoldPos) * 0.3;
+    // ── Beat seismic ripple — radial wave from center ──
+    h += beatPulse * 0.4 * sin(r * 16.0 - a.beatPhase * PI * 8.0) * exp(-r * r * 2.0);
+    h += a.beatDet * 0.15 * sin(r * 25.0 - a.beatPhase * PI * 12.0) * exp(-r * r * 3.0);
+
+    // ── Tempo pulse — continuous contour breathing ──
+    h += a.tempoPulse * 0.1 * sin(r * 8.0 - time * 2.0) * exp(-r * r * 1.5);
+
+    // ── Beat anticipation — pre-beat terrain swell ──
+    h += a.beatAnt * 0.25 * exp(-r * r * 3.0) * a.gated;
+
+    // ── Kick earthquake — central spike + crater ──
+    h += kickSurge * 0.6 * exp(-r * r * 5.0);
+    h -= kickSurge * 0.25 * sin(r * 22.0 - a.beatPhase * 30.0) * exp(-r * r * 3.0);
+    // Punch — impact crater ring
+    h += a.punch * 0.15 * exp(-pow(r - 0.3, 2.0) * 15.0) * a.gated;
+
+    // ── Transient crack — sharp linear discontinuity ──
+    if (transientAmt > 0.02) {
+        float crack = sin(sp.x * 3.5 + sp.y * 2.5 + time * 25.0) * transientAmt;
+        h += crack * 0.15 * exp(-r * r * 2.0) * a.gated;
+    }
+    // Dynamic — same as transient but continuous
+    h += a.dynamic * 0.05 * sin(sp.x * 5.0 + sp.y * 4.0 + time * 15.0) * exp(-r * r * 3.0);
+
+    // ── Envelope breathing — terrain rises and falls ──
+    h += envelope * 0.2 * sin(r * 6.0 - time * 1.5) * exp(-r * r * 1.0);
+
+    // ── Phrase breathing — slow terrain swell/contraction ──
+    h += sin(a.phraseBeat * PI * 2.0) * 0.15 * a.gated * exp(-r * r * 1.5);
+
+    // ── Burst event — terrain spike ──
+    if (a.burstTrig > 0.5) {
+        float burstAng = a.burstType * PI * 0.5 + time;
+        float2 burstPos = float2(cos(burstAng), sin(burstAng)) * 0.3;
+        h += a.burstInt * 0.4 * exp(-length(sp - burstPos) * length(sp - burstPos) * 8.0) * a.gated;
     }
 
-    // Beat ripple
-    disp += float3(0, 1, 0) * beatPulse * 0.04 * sin(manifoldPos.y * 5.0 - a.beatPhase * 8.0);
+    // ── Effect intensity — secondary terrain features ──
+    h += a.effectInt * 0.08 * sin(sp.x * 4.0 + sp.y * 3.0 + time * 5.0) * exp(-r * r * 2.0);
 
-    // Kick curvature spike
-    disp += normalize(manifoldPos) * kickSurge * 0.06 * exp(-length(manifoldPos) * 2.0) * sin(length(manifoldPos) * 10.0);
+    // ── THD roughness — high-frequency terrain noise ──
+    float thdNoise = sin(sp.x * 20.0 + time * 8.0) * thd * 0.06 * vrFlickerScale();
+    thdNoise += sin(sp.y * 18.0 - time * 6.0) * thd * 0.04 * vrFlickerScale();
+    thdNoise += (vnoise2(sp * 15.0 + time * 2.0) - 0.5) * thd * 0.08 * vrFlickerScale();
+    thdNoise *= (1.0 - a.calmMode * 0.6);
+    h += thdNoise;
 
-    // Transient — topology shift jitter
-    disp += float3(
-        sin(manifoldPos.x * 20.0 + Time * 20.0),
-        sin(manifoldPos.y * 18.0 + Time * 18.0),
-        sin(manifoldPos.z * 22.0 + Time * 22.0)
-    ) * transientAmt * 0.02;
+    // ── Phase coherence smooths terrain (reduces noise) ──
+    h *= (0.7 + phaseCoh * 0.3);
 
-    // THD roughness
-    disp += float3(
-        hash11(manifoldPos.x * 50.0 + Time * 10.0) - 0.5,
-        hash11(manifoldPos.y * 50.0 + Time * 10.0) - 0.5,
-        hash11(manifoldPos.z * 50.0 + Time * 10.0) - 0.5
-    ) * thd * 0.015;
+    // ── Crest sharpens terrain features ──
+    h *= (1.0 + crest * 0.2);
 
-    // Envelope breathing
-    disp += float3(0, 1, 0) * envelope * 0.015 * sin(Time + manifoldPos.x * 2.0);
+    // ── LUFS boosts overall terrain height ──
+    h *= (1.0 + lufs * 0.15);
 
-    return disp;
+    // ── Bar scale ──
+    h *= a.barScale;
+
+    return h;
 }
 
 float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target
 {
     AudioData a = extractAudio();
     float2 p = screenToAspect(uv);
+    // VR parallax — shift screen coords per eye for fake stereo depth
+    p += vrParallax(2.0);
     float r = length(p);
     float silence = 1.0 - a.isSilent;
+    float flashScale = vrFlashScale();
+    float flickerScale = vrFlickerScale();
 
-    // ── DSP additive ──
+    // ── DSP ──
     float lufs = lufsNormalized();
     float crest = crestFactorNormalized();
     float thd = thdNormalized();
     float phaseCoh = phaseCoherence();
-    float phaseCorr = phaseCoherence();
 
     // ── Audio dynamics ──
     float beatPulse = a.beat * a.tempoConf;
@@ -88,14 +204,14 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target
     float transientAmt = a.transient;
     float envelope = a.envelope;
 
-    // ── Camera — VR head pose or desktop orbiting manifold ──
+    // ── Camera — VR head pose or desktop ──
     SeCamera cam;
     if (VR_ACTIVE) {
         cam = seCameraVR();
     } else {
-        float FOV = 0.6;
-        float camAng = a.section * 0.8 + a.stereoBal * 0.2 + Time * 0.03 * a.motSpeed;
-        float3 camPos = float3(sin(camAng) * 3.5, 1.5 + a.stereoDiff * 0.1, cos(camAng) * 3.5);
+        float FOV = 0.85;
+        float camAng = a.section * 0.5 + a.stereoBal * 0.15 + Time * vrMotionScale(0.02) * a.motSpeed;
+        float3 camPos = float3(sin(camAng) * 3.0, 1.0 + a.stereoDiff * 0.08, cos(camAng) * 3.0);
         cam = seCamera(camPos, float3(0, 0, 0), FOV);
     }
 
@@ -120,157 +236,158 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target
     world.ambientColor = float3(0.008, 0.005, 0.015);
     seApplyWorldFog(emit, world);
 
+    // ── Spatial encoder color per band ──
+    float3 emitCol[8];
+    [unroll] for (int bi = 0; bi < 8; bi++) {
+        int n = bi * SE_N_SUB * 2;
+        emitCol[bi] = (emit[n].active > 0.01) ? emit[n].color : a.brainCol;
+    }
+
     // ── Background — dark topological space + world env ──
     float3 col = seWorldEnvironment(p, cam, world, a, kickSurge, silence);
     col += starfield(uv, a) * 0.003;
 
-    // ── Manifold surface — parametric grid driven by emitters ──
-    float genus = bands[0] * 2.0 + bands[1] * 1.0;
-    float globalScale = 1.0 + bands[0] * 0.3;
+    // ── Compute terrain height at this pixel ──
+    float h = terrainHeight(p, bands, a, crest, thd, phaseCoh, lufs,
+                            beatPulse, kickSurge, transientAmt,
+                            envelope, Time);
 
-    [loop] for (int gu = 0; gu <= GRID_N; gu++) {
-        [loop] for (int gv = 0; gv <= GRID_N; gv++) {
-            float u = float(gu) / float(GRID_N) * PI * 2.0;
-            float v = float(gv) / float(GRID_N) * PI;
+    // ── Contour line rendering ──
+    // Contour spacing — tighter with higher BPM, wider with calm mode
+    float contourSpacing = 0.15 + a.tempo * 0.05;
+    contourSpacing *= (1.0 + a.calmMode * 0.5);
+    contourSpacing *= (1.0 - a.tempoConf * 0.15);  // confident tempo = tighter
 
-            // Base sphere
-            float3 sphPos = float3(sin(v) * cos(u), cos(v), sin(v) * sin(u)) * globalScale;
+    // Contour line position
+    float contourNum = h / contourSpacing;
+    float contourFrac = frac(contourNum);
+    float contourDist = min(contourFrac, 1.0 - contourFrac) * contourSpacing;
 
-            // Torus transformation — genus >= 1
-            float torusBlend = smoothstep(0.5, 1.5, genus);
-            float R = 1.2, r2 = 0.5;
-            float3 torusPos = float3(
-                (R + r2 * cos(v)) * cos(u),
-                r2 * sin(v),
-                (R + r2 * cos(v)) * sin(u)
-            );
-            float3 manifoldPos = lerp(sphPos, torusPos, torusBlend);
+    // Contour line sharpness — crest makes lines crisper
+    float lineWidth = 0.004 / (1.0 + crest * 1.5);
+    float contourGlow = exp(-contourDist * contourDist / (lineWidth * lineWidth));
+    float contourCore = exp(-contourDist * contourDist / (lineWidth * lineWidth * 0.15));
+    float contourHalo = exp(-contourDist * contourDist / (lineWidth * lineWidth * 5.0));
 
-            // Double torus — genus >= 2
-            float doubleBlend = smoothstep(1.5, 2.5, genus);
-            float3 dTorusPos = torusPos;
-            dTorusPos.x += sin(u * 2.0) * 0.5 * doubleBlend;
-            dTorusPos.y += cos(u * 2.0) * 0.3 * doubleBlend;
-            manifoldPos = lerp(manifoldPos, dTorusPos, doubleBlend);
-
-            // Emitter-driven displacement
-            float3 disp = emitterInfluence(manifoldPos, emit, beatPulse, kickSurge,
-                                           transientAmt, thd, envelope, a);
-            manifoldPos += disp;
-
-            // Project to screen
-            float3 toMP = manifoldPos - cam.pos;
-            float mpDepth = dot(toMP, cam.fwd);
-            if (mpDepth < 0.1) continue;
-            float2 scrMP = float2(dot(toMP, cam.right) / (mpDepth * cam.fov),
-                                  dot(toMP, cam.up) / (mpDepth * cam.fov));
-            float scrDist = length(p - scrMP);
-
-            // Color — frequency-positioned by displacement magnitude
-            float dispMag = length(disp);
-            float freqFrac = clamp(dispMag * 3.0, 0.0, 1.0);
-            float3 ptCol = hsv(a.hueBase + freqFrac * a.hueRange, 0.6 * a.satur, 0.9);
-            ptCol = lerp(ptCol, lerp(a.brainCol, a.brainCol2, freqFrac), 0.3);
-            ptCol = lerp(ptCol, a.brainCol3, pow(dispMag * 2.0, 2.0) * crest * 0.3);
-
-            // Point glow — tight core + crisp mid, minimal halo
-            float ptSize = 0.006 / max(mpDepth * 0.15, 0.3);
-            float coreGlow = exp(-scrDist * scrDist / (ptSize * ptSize * 0.05));
-            float midGlow = exp(-scrDist * scrDist / (ptSize * ptSize * 0.3));
-            float haloGlow = exp(-scrDist * scrDist / (ptSize * ptSize * 1.5));
-
-            float intensity = (dispMag * 2.0 + 0.2) * (1.0 + lufs * 0.3);
-            float depthFade = exp(-mpDepth * world.fogDensity);
-
-            col += ptCol * coreGlow * intensity * depthFade * 0.35 * silence;
-            col += ptCol * midGlow * intensity * depthFade * 0.12 * silence;
-            col += ptCol * haloGlow * intensity * depthFade * 0.02 * silence;
-
-            // Wireframe to neighbors
-            if (gu < GRID_N) {
-                float u2 = float(gu + 1) / float(GRID_N) * PI * 2.0;
-                float3 pos2 = float3(sin(v) * cos(u2), cos(v), sin(v) * sin(u2)) * globalScale;
-                float3 torusPos2 = float3((R + r2 * cos(v)) * cos(u2), r2 * sin(v), (R + r2 * cos(v)) * sin(u2));
-                pos2 = lerp(pos2, torusPos2, torusBlend);
-                pos2 = lerp(pos2, torusPos2 + float3(sin(u2 * 2.0) * 0.5, cos(u2 * 2.0) * 0.3, 0) * doubleBlend, doubleBlend);
-                pos2 += emitterInfluence(pos2, emit, beatPulse, kickSurge, transientAmt, thd, envelope, a) * 0.7;
-
-                float3 toP2 = pos2 - cam.pos;
-                float d2 = dot(toP2, cam.fwd);
-                if (d2 > 0.1) {
-                    float2 s2 = float2(dot(toP2, cam.right) / (d2 * cam.fov), dot(toP2, cam.up) / (d2 * cam.fov));
-                    float2 ab = s2 - scrMP;
-                    float t2 = clamp(dot(p - scrMP, ab) / max(dot(ab, ab), 0.0001), 0.0, 1.0);
-                    float2 cl = scrMP + ab * t2;
-                    float wd = length(p - cl);
-                    col += ptCol * exp(-wd * wd * 500.0) * intensity * depthFade * 0.04 * silence;
-                }
-            }
-            if (gv < GRID_N) {
-                float v2 = float(gv + 1) / float(GRID_N) * PI;
-                float3 pos2 = float3(sin(v2) * cos(u), cos(v2), sin(v2) * sin(u)) * globalScale;
-                float3 torusPos2 = float3((R + r2 * cos(v2)) * cos(u), r2 * sin(v2), (R + r2 * cos(v2)) * sin(u));
-                pos2 = lerp(pos2, torusPos2, torusBlend);
-                pos2 = lerp(pos2, torusPos2 + float3(sin(u * 2.0) * 0.5, cos(u * 2.0) * 0.3, 0) * doubleBlend, doubleBlend);
-                pos2 += emitterInfluence(pos2, emit, beatPulse, kickSurge, transientAmt, thd, envelope, a) * 0.7;
-
-                float3 toP2 = pos2 - cam.pos;
-                float d2 = dot(toP2, cam.fwd);
-                if (d2 > 0.1) {
-                    float2 s2 = float2(dot(toP2, cam.right) / (d2 * cam.fov), dot(toP2, cam.up) / (d2 * cam.fov));
-                    float2 ab = s2 - scrMP;
-                    float t2 = clamp(dot(p - scrMP, ab) / max(dot(ab, ab), 0.0001), 0.0, 1.0);
-                    float2 cl = scrMP + ab * t2;
-                    float wd = length(p - cl);
-                    col += ptCol * exp(-wd * wd * 500.0) * intensity * depthFade * 0.04 * silence;
-                }
-            }
-        }
-    }
-
-    // ── Emitter glow — depth-aware, VR or desktop ──
-    if (VR_ACTIVE) {
-        float3 headPos = float3(VRHeadPos.xyz);
-        [loop] for (int j = 0; j < SE_NUM_OBJ; j++) {
-            if (emit[j].active < 0.01 || emit[j].depth < 0.1) continue;
-            col += seEmitGlowVR(p, emit[j], world, headPos, silence);
-        }
+    // ── Contour color — height-based gradient ──
+    // Map height to color: low = brainCol, mid = brainCol2, high = brainCol3
+    float hNorm = saturate(h * 0.5 + 0.5);
+    float3 contourCol;
+    if (hNorm < 0.5) {
+        contourCol = lerp(a.brainCol, a.brainCol2, hNorm * 2.0);
     } else {
-        [loop] for (int j = 0; j < SE_NUM_OBJ; j++) {
-            if (emit[j].active < 0.01 || emit[j].depth < 0.1) continue;
-            col += seEmitGlowDepth(p, emit[j], world, lufs, crest, beatPulse,
-                                   a.beatPhase, kickSurge, transientAmt, silence);
+        contourCol = lerp(a.brainCol2, a.brainCol3, (hNorm - 0.5) * 2.0);
+    }
+    // Spectral centroid shifts color weighting
+    contourCol = lerp(contourCol, hsv(a.hueBase + a.specCent * a.hueRange, a.satur, 1.0), 0.15);
+    // Color pulse hue shift
+    contourCol = lerp(contourCol, contourCol.bgr, a.colorPulse * 0.03);
+
+    // ── Contour intensity — all audio data drives brightness ──
+    float intensity = a.gated;
+    intensity *= (0.7 + a.brightness * 0.3);
+    intensity *= (1.0 - a.calmMode * 0.4);
+    intensity *= (1.0 + lufs * 0.3);
+    intensity *= (0.8 + envelope * 0.4);
+    intensity += a.glow * 0.05 * a.gated;
+    intensity += a.beatAnt * 0.12 * a.gated;
+    // Bloom softens contours
+    intensity *= (1.0 + a.bloom * 0.2);
+    // Ambient level adds baseline
+    intensity += a.ambientLevel * 0.03;
+
+    // ── Render contour lines ──
+    if (intensity > 0.01 && abs(h) > 0.01) {
+        col += contourCol * (contourGlow * 0.12 + contourCore * 0.3) * intensity * silence;
+        col += contourCol * contourHalo * intensity * 0.06 * silence;
+
+        // ── Beat seismic pulse — contour lines brighten on beat ──
+        float beatSeismic = sin(r * 16.0 - a.beatPhase * PI * 8.0) * beatPulse;
+        col += contourCol * contourCore * abs(beatSeismic) * intensity * 0.2 * silence;
+
+        // ── Beat anticipation — contours swell before beat ──
+        col += contourCol * contourCore * a.beatAnt * 0.15 * a.gated * silence;
+
+        // ── Kick earthquake — contour flash ──
+        col += float3(1.0, 0.5, 0.2) * contourCore * kickSurge * intensity * 0.25 * flashScale * silence;
+        col += float3(1.0, 0.6, 0.3) * contourHalo * a.punch * 0.1 * flashScale * silence;
+
+        // ── Transient crack — bright contour disruption ──
+        if (transientAmt > 0.02) {
+            float crack = sin(p.x * 3.5 + p.y * 2.5 + Time * 25.0) * transientAmt;
+            col += float3(1.0, 0.8, 0.5) * contourGlow * abs(crack) * intensity * 0.12 * silence;
+        }
+
+        // ── Crest ridge sharpening ──
+        col += contourCol * contourCore * crest * intensity * 0.08 * silence;
+
+        // ── Beam — directional light across terrain ──
+        if (a.beamActive > 0.5) {
+            float beamDir = dot(normalize(p), float2(cos(a.hueCenter * PI * 2.0), sin(a.hueCenter * PI * 2.0)));
+            col += contourCol * contourCore * smoothstep(0.6, 1.0, beamDir) * a.beam * 0.1 * silence;
+        }
+
+        // ── Dynamic light — beat-synced lighting ──
+        col += contourCol * contourCore * a.dynLight * 0.06 * silence;
+
+        // ── Section change flash ──
+        if (a.shouldChg > 0.5) {
+            col += hsv(a.hueCenter, 0.2, 1.0) * contourCore * smoothstep(1.0, 0.0, r) * 0.08 * silence;
+        }
+
+        // ── Burst event — bright contour spike ──
+        if (a.burstTrig > 0.5) {
+            col += hsv(a.hueCenter + 0.1, 0.4, 1.0) * contourCore * a.burstInt * 0.15 * silence;
         }
     }
 
-    // ── L↔R links ──
-    [loop] for (int lb = 0; lb < SE_N_BANDS; lb++) {
-        col += seLinkLR(p, emit, lb, phaseCorr, phaseCoh, silence);
-    }
+    // ── Terrain fill — subtle color between contour lines ──
+    float fillIntensity = abs(h) * a.gated * 0.04;
+    fillIntensity *= (1.0 + lufs * 0.2);
+    fillIntensity *= (1.0 - a.calmMode * 0.5);
+    col += contourCol * fillIntensity * silence;
+
+    // ── Inner terrain glow — hot center ──
+    float innerGlow = exp(-r * r * 6.0);
+    col += a.brainCol * innerGlow * a.energy * 0.06 * a.gated * silence;
+    col += float3(1.0, 0.6, 0.3) * innerGlow * kickSurge * 0.08 * flashScale * silence;
+    col += a.brainCol3 * innerGlow * a.ambient * 0.03 * a.ambActive * silence;
+
+    // ── Ambient atmosphere glow ──
+    col += ambientGlow(r, a) * 0.5 * silence;
 
     // ── Listener focal point ──
     col += seListener(p, cam, a, beatPulse, kickSurge, silence);
 
-    // ── Mode-specific overlays — subtle ──
-    float ringDist = abs(r - a.beatPhase * 0.7);
+    // ── Kick — earthquake ring ──
+    if (kickSurge > 0.05) {
+        float kickR = a.beatPhase * 0.5;
+        float kickDist = abs(r - kickR);
+        col += a.brainCol * exp(-kickDist * kickDist * 30.0) * kickSurge * 0.05 * silence;
+    }
+
+    // ── Beat ring ──
+    float ringDist = abs(r - a.beatPhase * 0.6);
     col += a.brainCol * exp(-ringDist * ringDist * 40.0) * beatPulse * 0.02 * silence;
-    col += a.brainCol3 * kickSurge * 0.04 * exp(-r * r * 5.0) * silence;
-    col += float3(1.0, 0.8, 0.5) * transientAmt * 0.02 * silence;
-    col += a.brainCol3 * a.colorPulse * 0.015 * silence;
-    col += a.brainCol2 * a.energy * 0.01 * silence;
-    col += a.brainCol * a.punch * 0.01 * silence;
-    col += a.brainCol * a.beatAnt * 0.008 * exp(-r * 2.0) * silence;
+
+    // ── Phrase breathing ──
+    float phraseMod = sin(a.phraseBeat * PI * 2.0) * 0.02 * a.gated;
+    col += a.brainCol * phraseMod * silence;
+
+    // ── Motion persistence — subtle afterimage glow ──
+    col *= (1.0 + a.motionPers * 0.05);
 
     // ── Dynamic range ──
     col *= (0.3 + a.gated * 0.7);
 
     // ── Standard overlays ──
-    col += standardOverlays(p, r, a) * 0.02;
+    col += standardOverlays(p, r, a) * 0.015;
 
-        // ── Active-emitter normalization — busy music doesn't stack brighter ──
+    // ── Active-emitter normalization ──
     col *= sqrt(16.0 / seActiveCount(emit));
-    // ── Soft tone mapping (Reinhard) — no hard clamp, preserves color ──
-    col = softReinhard(col);
+
+    // ── Dynamic HDR limiter ──
+    col = hdrLimiter(col);
 
     col *= silence;
 

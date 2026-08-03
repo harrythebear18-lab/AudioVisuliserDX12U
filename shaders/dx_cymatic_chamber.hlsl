@@ -1,92 +1,103 @@
 // RS by Resonance — RapidSpectrum Visualizer
-// HUD Mode 45: Cymatic Resonance Chamber — 3D Chladni patterns on parallel surfaces
+// HUD Mode 45: Cymatic Resonance Chamber — procedurally generated Chladni patterns
 // VR Layer mode. Uses spatial_encoder.hlsl with SE_PROFILE_PSYCHOACOUSTIC.
 //
-// 48 emitters (8 bands × 3 sub × L/R) placed as psychoacoustic sources.
-// Each band = a different resonance frequency on a parallel surface.
-// Emitters drive surface positions and Chladni nodal patterns.
-// Kick = surface impact. Transient = pattern rearrangement.
-// Beat = standing wave pulse.
+// Concept: A vibrating plate where Chladni nodal patterns form procedurally.
+// All 8 band values superimpose as different vibration modes — the pattern
+// shape itself is generated from the audio, not just brightness modulation.
+// DSP data (LUFS, crest, THD, phase) shapes pattern deformation.
+// Spatial encoder provides per-band color and spatial modulation.
+// Beat = standing wave pulse. Kick = impact ripple. Transient = pattern scatter.
+// Brain band values are the primary driver — silent bands = no pattern.
 //
-// World: grid floor for depth grounding, fog density 0.05, dark ambient.
-// Camera: looking into the chamber from front, FOV 0.65 (VR: head pose from OpenXR).
-// Visual: parallel surfaces at emitter-driven depths with Chladni particle patterns.
-//
-// DSP: LUFS→surface brightness, crest→pattern sharpness, THD→surface noise, phase→pattern symmetry.
-// HDR output to Layer 0. No local postfx. Pipeline owns bloom/tonemap.
+// No seEmitGlowDepth/VR, no seLinkLR, no softReinhard. Full audio brain.
+// HDR output to Layer 0. No local postfx.
 
 #include "include/spatial_encoder.hlsl"
 #include "include/layers.hlsl"
 
 #define PI 3.14159265
-#define GRID_N 8
 
-// Chladni pattern — nodal lines where particles collect
-float chladniPattern(float2 uv, float freq, float phase)
+// Procedural Chladni pattern — superposition of vibration modes
+// Each band contributes a mode with frequency proportional to band index.
+// Band energy controls amplitude, frequency shift, and plate warping.
+// No normalization — raw sum means more active bands = brighter pattern.
+float proceduralChladni(float2 uv, float bands[8], float time,
+                        float crest, float thd, float phaseCoh,
+                        float beatPulse, float beatPhase,
+                        float kickSurge, float transientAmt,
+                        float envelope, float lufs)
 {
-    float x = uv.x * PI * freq;
-    float y = uv.y * PI * freq;
-    float n = freq;
-    float m = freq * 0.7 + 1.0;
-    float pattern = sin(n * x + phase) * sin(m * y) - sin(m * x) * sin(n * y + phase);
-    return abs(pattern);
-}
+    float total = 0.0;
 
-// ── Cymatic surface derived from emitters (one per band) ──
-struct CymaticSurface {
-    float zDepth;
-    float yOffset;
-    float frequency;
-    float amplitude;
-    float gate;
-    float3 color;
-};
+    [unroll] for (int i = 0; i < 8; i++) {
+        float bandVal = bands[i];
+        if (bandVal < 0.01) continue;
 
-void computeSurfacesFromEmitters(out CymaticSurface surfaces[SE_N_BANDS], SeEmitter emit[SE_NUM_OBJ], AudioData a)
-{
-    [unroll] for (int band = 0; band < SE_N_BANDS; band++) {
-        int idx = band * SE_N_SUB * 2;
-        float bt = float(band) / float(SE_N_BANDS - 1);
+        // Each band = a different (n,m) vibration mode
+        // Band energy shifts frequency — active bands vibrate faster
+        float n = float(i + 2) + bandVal * 0.8;
+        float m = float(i + 2) * 0.7 + 1.0 + bandVal * 0.5;
 
-        surfaces[band].gate = emit[idx].active * step(0.05, emit[idx].intensity);
-        if (surfaces[band].gate < 0.01) {
-            surfaces[band].zDepth = 100.0;
-            surfaces[band].yOffset = 0.0;
-            surfaces[band].frequency = 4.0;
-            surfaces[band].amplitude = 0.0;
-            surfaces[band].color = float3(0, 0, 0);
-            continue;
-        }
+        // Phase evolves with time + beat, each band at different speed
+        float phase = time * (0.3 + float(i) * 0.1) + beatPhase * float(i) * 0.5;
+        // Envelope adds breathing to phase
+        phase += envelope * float(i) * 0.3;
 
-        // Average energy across all subs for this band
-        float avgEnergy = 0.0;
-        [unroll] for (int sub = 0; sub < SE_N_SUB; sub++) {
-            avgEnergy += emit[band * SE_N_SUB * 2 + sub * 2].intensity;
-            avgEnergy += emit[band * SE_N_SUB * 2 + sub * 2 + 1].intensity;
-        }
-        avgEnergy /= float(SE_N_SUB * 2);
+        // Band-driven plate warping — each band displaces the plate differently
+        float2 warpedUV = uv;
+        warpedUV.x += sin(uv.y * 3.0 + time * 2.0 + float(i)) * bandVal * 0.15;
+        warpedUV.y += cos(uv.x * 3.0 + time * 1.5 + float(i) * 2.0) * bandVal * 0.12;
 
-        surfaces[band].zDepth = lerp(-3.0, 0.5, bt);
-        surfaces[band].frequency = lerp(2.0, 16.0, bt) * (1.0 + a.tempo * 0.2);
-        surfaces[band].yOffset = emit[idx].worldPos.y * 0.5;
-        surfaces[band].amplitude = avgEnergy;
-        surfaces[band].color = emit[idx].color;
+        // Kick compression — squeezes plate inward
+        float kickWarp = kickSurge * 0.1 * (1.0 - bandVal);
+        warpedUV *= (1.0 - kickWarp);
+
+        // Transient scatter — sharp displacement spikes
+        warpedUV += float2(sin(uv.x * 20.0 + time * 15.0), cos(uv.y * 18.0 + time * 12.0)) * transientAmt * 0.05;
+
+        // Chladni nodal pattern for this mode
+        float x = warpedUV.x * PI * n;
+        float y = warpedUV.y * PI * m;
+        float mode = sin(n * x + phase) * sin(m * y) - sin(m * x) * sin(n * y + phase);
+        mode = abs(mode);
+
+        // Nodal lines — particles collect where mode ≈ 0
+        // Band energy makes nodal lines sharper (higher energy = more defined)
+        float nodal = exp(-mode * mode * (2.0 + crest * 2.0 + bandVal * 2.0));
+
+        // THD adds noise to pattern
+        nodal *= (1.0 - thd * 0.25 * sin(uv.x * 30.0 + time * 10.0 + float(i)) * vrFlickerScale());
+
+        // Phase coherence sharpens patterns
+        nodal *= (0.6 + phaseCoh * 0.4);
+
+        // LUFS boosts overall pattern strength
+        nodal *= (1.0 + lufs * 0.3);
+
+        // Raw sum — no normalization, more active bands = brighter
+        total += nodal * bandVal * 2.0;
     }
+
+    return total;
 }
 
 float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target
 {
     AudioData a = extractAudio();
     float2 p = screenToAspect(uv);
+    // VR parallax — shift screen coords per eye for fake stereo depth
+    p += vrParallax(1.5);  // plate at ~1.5 units depth
     float r = length(p);
     float silence = 1.0 - a.isSilent;
+    float flashScale = vrFlashScale();
+    float flickerScale = vrFlickerScale();
 
     // ── DSP additive ──
     float lufs = lufsNormalized();
     float crest = crestFactorNormalized();
     float thd = thdNormalized();
     float phaseCoh = phaseCoherence();
-    float phaseCorr = phaseCoherence();
 
     // ── Audio dynamics ──
     float beatPulse = a.beat * a.tempoConf;
@@ -94,15 +105,15 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target
     float transientAmt = a.transient;
     float envelope = a.envelope;
 
-    // ── Camera — VR head pose or desktop looking into chamber ──
+    // ── Camera — VR head pose or desktop ──
     SeCamera cam;
     if (VR_ACTIVE) {
         cam = seCameraVR();
     } else {
-        float FOV = 0.65;
-        float camAng = a.section * 0.3 + a.stereoBal * 0.15 + Time * 0.02 * a.motSpeed;
-        float3 camPos = float3(sin(camAng) * 1.5, 0.5 + a.stereoDiff * 0.05, 3.0);
-        cam = seCamera(camPos, float3(0, 0, -1.5), FOV);
+        float FOV = 0.85;
+        float camAng = a.section * 0.3 + a.stereoBal * 0.15 + Time * vrMotionScale(0.02) * a.motSpeed;
+        float3 camPos = float3(sin(camAng) * 2.0, 0.5 + a.stereoDiff * 0.05, 4.0);
+        cam = seCamera(camPos, float3(0, 0, 0), FOV);
     }
 
     // ── Spatial encoder: PSYCHOACOUSTIC profile ──
@@ -126,123 +137,134 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target
     world.ambientColor = float3(0.012, 0.008, 0.02);
     seApplyWorldFog(emit, world);
 
-    // ── Derive surfaces from emitters ──
-    CymaticSurface surfaces[SE_N_BANDS];
-    computeSurfacesFromEmitters(surfaces, emit, a);
+    // ── Spatial encoder color per band ──
+    float3 emitCol[8];
+    float spatialMod[8];
+    [unroll] for (int bi = 0; bi < 8; bi++) {
+        int n = bi * SE_N_SUB * 2;
+        emitCol[bi] = (emit[n].active > 0.01) ? emit[n].color : a.brainCol;
+        spatialMod[bi] = (emit[n].active > 0.01) ? (emit[n].intensity + 0.5) : 1.0;
+    }
 
     // ── Background — dark resonance chamber + world env ──
     float3 col = seWorldEnvironment(p, cam, world, a, kickSurge, silence);
     col += starfield(uv, a) * 0.003;
 
-    // ── Cymatic surfaces — parallel planes at different depths ──
-    [loop] for (int s = 0; s < SE_N_BANDS; s++) {
-        if (surfaces[s].gate < 0.01) continue;
+    // ── Procedural Chladni pattern on vibrating plate ──
+    // Map screen position to plate coordinates
+    float2 plateUV = p * 2.0;  // scale to plate
 
-        float3 surfCenter = float3(0, surfaces[s].yOffset, surfaces[s].zDepth);
-        float3 toSurf = surfCenter - cam.pos;
-        float surfDepth = dot(toSurf, cam.fwd);
-        if (surfDepth < 0.1) continue;
-        float2 scrSurf = float2(dot(toSurf, cam.right) / (surfDepth * cam.fov),
-                                dot(toSurf, cam.up) / (surfDepth * cam.fov));
-        float surfSize = 2.5 / (surfDepth * cam.fov);
+    // Plate rotation — slow drift with stereo balance
+    float plateRot = Time * 0.05 * a.motSpeed + a.stereoBal * 0.2;
+    float ca = cos(plateRot), sa = sin(plateRot);
+    float2 plateP = float2(plateUV.x * ca - plateUV.y * sa,
+                           plateUV.x * sa + plateUV.y * ca);
 
-        // Grid of particles on surface showing Chladni pattern
-        [loop] for (int gx = 0; gx <= GRID_N; gx++) {
-            [loop] for (int gy = 0; gy <= GRID_N; gy++) {
-                float2 gridUV = float2(float(gx), float(gy)) / float(GRID_N) - 0.5;
-                gridUV *= 4.0;
+    // Procedural pattern — all 8 bands superimposed (raw sum, no normalization)
+    float pattern = proceduralChladni(plateP, bands, Time, crest, thd, phaseCoh,
+                                      beatPulse, a.beatPhase,
+                                      kickSurge, transientAmt,
+                                      envelope, lufs);
 
-                float bt = float(s) / float(SE_N_BANDS - 1);
-                float vertPhase = Time * 0.5 + bt * PI;
-                vertPhase += surfaces[s].yOffset * 2.0;
-                vertPhase += a.beatPhase * bt * 3.0;
-                float pattern = chladniPattern(gridUV, surfaces[s].frequency, vertPhase);
+    // Overall intensity from total band energy
+    float totalBand = (bands[0] + bands[1] + bands[2] + bands[3] +
+                       bands[4] + bands[5] + bands[6] + bands[7]) * 0.125;
+    float intensity = totalBand * a.gated;
+    intensity *= (0.7 + a.brightness * 0.3);
+    intensity *= (1.0 - a.calmMode * 0.3);
+    intensity *= (1.0 + lufs * 0.3);
+    intensity += a.glow * 0.04 * a.gated;
+    intensity += a.beatAnt * 0.1 * a.gated;
+    // Envelope adds breathing
+    intensity *= (0.8 + envelope * 0.4);
 
-                float nodal = exp(-pattern * pattern * 5.0 * (1.0 + crest * 0.5));
-                nodal *= (1.0 - thd * 0.3 * hash21(gridUV * 50.0 + Time * 10.0));
+    if (intensity > 0.01 && pattern > 0.01) {
+        // Procedural color — blend band colors weighted by band values
+        float3 patternCol = float3(0, 0, 0);
+        float colorWeight = 0.0;
+        [unroll] for (int ci = 0; ci < 8; ci++) {
+            float bw = bands[ci] * a.gated;
+            if (bw < 0.01) continue;
+            float3 bc = lerp(float3(1.0, 0.6, 0.3), a.brainCol2, float(ci) / 7.0);
+            bc = lerp(bc, emitCol[ci], 0.4);
+            patternCol += bc * bw;
+            colorWeight += bw;
+        }
+        if (colorWeight > 0.01) patternCol /= colorWeight;
+        else patternCol = a.brainCol;
+        patternCol = lerp(patternCol, patternCol.bgr, a.colorPulse * 0.02);
 
-                float impactDist = length(gridUV);
-                nodal += kickSurge * exp(-impactDist * impactDist * 3.0) * 0.3;
+        // Pattern glow — nodal lines are bright (pattern is raw sum, can be > 1)
+        float patternGlow = pattern * intensity * 0.15;
+        col += patternCol * patternGlow * silence;
 
-                nodal *= (1.0 - transientAmt * 0.2 * sin(gridUV.x * 20.0 + Time * 30.0));
+        // Beat standing wave — visible pulse traveling through pattern
+        float beatWave = sin(r * 15.0 - a.beatPhase * PI * 6.0) * beatPulse;
+        col += patternCol * pattern * abs(beatWave) * intensity * 0.15 * silence;
 
-                if (nodal < 0.01) continue;
+        // Beat anticipation — pre-beat swell brightens pattern
+        col += patternCol * pattern * a.beatAnt * 0.08 * a.gated * silence;
 
-                float3 particlePos = float3(gridUV.x, gridUV.y + surfaces[s].yOffset, surfaces[s].zDepth);
-                particlePos.y += a.stereoBal * 0.1 * gridUV.x;
-                particlePos.y += sin(gridUV.x * 3.0 + Time * 2.0 + bt * PI) * surfaces[s].amplitude * 0.15;
+        // Kick impact — radial ripple distorts pattern visibly
+        float kickRipple = sin(r * 25.0 - a.beatPhase * 15.0) * kickSurge;
+        col += float3(1.0, 0.5, 0.2) * pattern * abs(kickRipple) * intensity * 0.12 * flashScale * silence;
 
-                float3 toPart = particlePos - cam.pos;
-                float partDepth = dot(toPart, cam.fwd);
-                if (partDepth < 0.1) continue;
-                float2 scrPart = float2(dot(toPart, cam.right) / (partDepth * cam.fov),
-                                        dot(toPart, cam.up) / (partDepth * cam.fov));
-                float scrDist = length(p - scrPart);
+        // Kick flash — bright center impact
+        col += float3(1.0, 0.6, 0.3) * pattern * kickSurge * exp(-r * r * 8.0) * 0.1 * flashScale * silence;
 
-                float ptSize = 0.01 / max(partDepth * 0.15, 0.3);
-                float coreGlow = exp(-scrDist * scrDist / (ptSize * ptSize * 0.1));
-                float midGlow = exp(-scrDist * scrDist / (ptSize * ptSize * 0.5));
-
-                float intensity = nodal * surfaces[s].amplitude * (1.0 + lufs * 0.3);
-                float depthFade = exp(-partDepth * world.fogDensity);
-
-                col += surfaces[s].color * coreGlow * intensity * depthFade * 0.25 * silence;
-                col += surfaces[s].color * midGlow * intensity * depthFade * 0.08 * silence;
-            }
+        // Transient scatter — disrupts pattern with sharp spikes
+        if (transientAmt > 0.02) {
+            float scatter = sin(plateP.x * 15.0 + plateP.y * 12.0 + Time * 25.0) * transientAmt;
+            col += float3(1.0, 0.8, 0.5) * pattern * abs(scatter) * intensity * 0.08 * silence;
         }
 
-        // Surface frame — edge glow
-        float2 frameDist = abs(p - scrSurf);
-        float frameEdge = max(abs(frameDist.x - surfSize), abs(frameDist.y - surfSize));
-        col += surfaces[s].color * exp(-frameEdge * frameEdge * 50.0) * surfaces[s].amplitude * 0.015 * silence;
+        // Crest sharpens nodal lines
+        col += patternCol * pattern * crest * intensity * 0.06 * silence;
+
+        // Vocal band boost — speech mode brightens vocal-range patterns
+        float vocalWeight = smoothstep(2.5, 3.5, 3.0) * (1.0 - smoothstep(5.0, 6.0, 3.0));
+        col += patternCol * pattern * a.speechMode * vocalWeight * 0.1 * a.gated * silence;
     }
 
-    // ── Emitter glow — depth-aware, VR or desktop ──
-    if (VR_ACTIVE) {
-        float3 headPos = float3(VRHeadPos.xyz);
-        [loop] for (int j = 0; j < SE_NUM_OBJ; j++) {
-            if (emit[j].active < 0.01 || emit[j].depth < 0.1) continue;
-            col += seEmitGlowVR(p, emit[j], world, headPos, silence);
-        }
-    } else {
-        [loop] for (int j = 0; j < SE_NUM_OBJ; j++) {
-            if (emit[j].active < 0.01 || emit[j].depth < 0.1) continue;
-            col += seEmitGlowDepth(p, emit[j], world, lufs, crest, beatPulse,
-                                   a.beatPhase, kickSurge, transientAmt, silence);
-        }
-    }
+    // ── Surface edge glow — chamber boundary ──
+    float chamberR = 0.7;
+    float edgeDist = abs(r - chamberR);
+    float edgeGlow = exp(-edgeDist * edgeDist * 80.0);
+    col += a.brainCol3 * edgeGlow * totalBand * 0.08 * a.gated * silence;
 
-    // ── L↔R links ──
-    [loop] for (int lb = 0; lb < SE_N_BANDS; lb++) {
-        col += seLinkLR(p, emit, lb, phaseCorr, phaseCoh, silence);
-    }
+    // ── Inner resonance glow ──
+    float innerGlow = exp(-r * r * 6.0);
+    col += a.brainCol * innerGlow * a.energy * 0.05 * a.gated * silence;
+    col += float3(1.0, 0.6, 0.3) * innerGlow * kickSurge * 0.06 * flashScale * silence;
 
     // ── Listener focal point ──
     col += seListener(p, cam, a, beatPulse, kickSurge, silence);
 
     // ── Beat — standing wave pulse ──
-    col += a.brainCol * beatPulse * exp(-a.beatPhase * 4.0) * 0.025 * silence;
+    col += a.brainCol * beatPulse * exp(-a.beatPhase * 4.0) * 0.02 * silence;
 
-    // ── Mode-specific overlays — subtle ──
-    col += a.brainCol3 * kickSurge * 0.04 * exp(-r * r * 5.0) * silence;
-    col += float3(1.0, 0.8, 0.5) * transientAmt * 0.02 * silence;
-    float ringDist = abs(r - a.beatPhase * 0.7);
-    col += a.brainCol * exp(-ringDist * ringDist * 40.0) * beatPulse * 0.02 * silence;
-    col += a.brainCol3 * a.colorPulse * 0.015 * silence;
-    col += a.brainCol2 * a.energy * 0.01 * silence;
-    col += a.brainCol * a.punch * 0.01 * silence;
-    col += a.brainCol * a.beatAnt * 0.008 * exp(-r * 2.0) * silence;
+    // ── Kick — impact ring ──
+    if (kickSurge > 0.05) {
+        float kickR = a.beatPhase * 0.6;
+        float kickDist = abs(r - kickR);
+        col += a.brainCol * exp(-kickDist * kickDist * 30.0) * kickSurge * 0.04 * silence;
+    }
+
+    // ── Phrase breathing ──
+    float phraseMod = sin(a.phraseBeat * PI * 2.0) * 0.015 * a.gated;
+    col += a.brainCol * phraseMod * silence;
 
     // ── Dynamic range ──
     col *= (0.3 + a.gated * 0.7);
 
     // ── Standard overlays ──
-    col += standardOverlays(p, r, a) * 0.02;
+    col += standardOverlays(p, r, a) * 0.015;
 
-        // ── Active-emitter normalization — busy music doesn't stack brighter ──
+    // ── Active-emitter normalization ──
     col *= sqrt(16.0 / seActiveCount(emit));
-    // ── Soft tone mapping (Reinhard) — no hard clamp, preserves color ──
-    col = softReinhard(col);
+
+    // ── Dynamic HDR limiter ──
+    col = hdrLimiter(col);
 
     col *= silence;
 

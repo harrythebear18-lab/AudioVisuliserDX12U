@@ -100,7 +100,7 @@ float3 itdWavefront(float2 p, SeEmitter e, float stereoDiff, float phaseCoh,
     float waveSpeed = lerp(0.4, 1.0, bandFrac);
 
     float3 col = float3(0, 0, 0);
-    [unroll] for (int w = 0; w < 2; w++) {
+    [unroll] for (int w = 0; w < 1; w++) {
         float phaseOffset = float(w) * 0.5;
         float ringR = frac(wp * waveSpeed * 0.12 + phaseOffset) * maxR;
         float ringDist = abs(d - ringR);
@@ -174,51 +174,28 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target
     float3 col = seWorldEnvironment(p, cam, world, a, kickSurge, silence);
     col += starfield(uv, a) * 0.005;
 
-    // ── ILD vectors — interaural level difference beams (16-source culling) ──
+    // ── PRIMARY VISUAL: ILD vectors — interaural level difference beams ──
+    // This is the core identity of this mode: visible psychoacoustic localization beams
     [loop] for (int bi = 0; bi < SE_N_BANDS; bi++) {
         int li = bi * SE_N_SUB * 2 + 2;  // si=1, left
         int ri = bi * SE_N_SUB * 2 + 3;  // si=1, right
-        col += ildVector(p, emit[li], emit[ri], phaseCoh, a.stereoWid, silence);
+        col += ildVector(p, emit[li], emit[ri], phaseCoh, a.stereoWid, silence) * 4.0;
     }
 
-    // ── ITD wavefronts — interaural time difference rings (16-source culling) ──
+    // ── PRIMARY VISUAL: ITD wavefronts — interaural time difference rings ──
     [loop] for (int bi2 = 0; bi2 < SE_N_BANDS; bi2++) {
         int li = bi2 * SE_N_SUB * 2 + 2;
         int ri = bi2 * SE_N_SUB * 2 + 3;
         if (emit[li].active > 0.01 && emit[li].depth > 0.1)
-            col += itdWavefront(p, emit[li], a.stereoDiff, phaseCoh, beatPulse, silence);
+            col += itdWavefront(p, emit[li], a.stereoDiff, phaseCoh, beatPulse, silence) * 3.0;
         if (emit[ri].active > 0.01 && emit[ri].depth > 0.1)
-            col += itdWavefront(p, emit[ri], a.stereoDiff, phaseCoh, beatPulse, silence);
+            col += itdWavefront(p, emit[ri], a.stereoDiff, phaseCoh, beatPulse, silence) * 3.0;
     }
 
-    // ── Direct sound — emitter glow (primary visual, 16-source culling) ──
-    if (VR_ACTIVE) {
-        float3 headPos = float3(VRHeadPos.xyz);
-        [loop] for (int bi3 = 0; bi3 < SE_N_BANDS; bi3++) {
-            int li = bi3 * SE_N_SUB * 2 + 2;
-            int ri = bi3 * SE_N_SUB * 2 + 3;
-            if (emit[li].active > 0.01 && emit[li].depth > 0.1)
-                col += seEmitGlowVR(p, emit[li], world, headPos, silence);
-            if (emit[ri].active > 0.01 && emit[ri].depth > 0.1)
-                col += seEmitGlowVR(p, emit[ri], world, headPos, silence);
-        }
-    } else {
-        [loop] for (int bi4 = 0; bi4 < SE_N_BANDS; bi4++) {
-            int li = bi4 * SE_N_SUB * 2 + 2;
-            int ri = bi4 * SE_N_SUB * 2 + 3;
-            if (emit[li].active > 0.01 && emit[li].depth > 0.1)
-                col += seEmitGlowDepth(p, emit[li], world, lufs, crest, beatBright,
-                                       a.beatPhase, kickSurge, transientAmt, silence);
-            if (emit[ri].active > 0.01 && emit[ri].depth > 0.1)
-                col += seEmitGlowDepth(p, emit[ri], world, lufs, crest, beatBright,
-                                       a.beatPhase, kickSurge, transientAmt, silence);
-        }
-    }
+    // ── No emitter glow — ILD/ITD beams ARE the visual identity, glow adds latency ──
+    // (spatial reference comes from world grid + listener focal point)
 
-    // ── L↔R links — phase coherence beams ──
-    [loop] for (int lb = 0; lb < SE_N_BANDS; lb++) {
-        col += seLinkLR(p, emit, lb, phaseCorr, phaseCoh, silence);
-    }
+    // ── No L↔R links — ILD beams already show L/R relationship ──
 
     // ── Listener focal point — spatial anchor ──
     col += seListener(p, cam, a, beatPulse, kickSurge, silence);
@@ -226,13 +203,6 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target
     // ── Diffuse field glow — decorrelation creates ambient wash ──
     float diffuseness = (1.0 - phaseCoh) * envelope * 0.01;
     col += a.brainCol2 * diffuseness * exp(-r * 1.5) * silence;
-    col += a.brainCol3 * diffuseness * 0.005 * silence;
-
-    // ── Ambient energy — minimal ──
-    col += a.brainCol3 * a.colorPulse * 0.01 * silence;
-    col += a.brainCol * a.energy * 0.005 * silence;
-    col += a.brainCol2 * a.punch * 0.005 * silence;
-    col += a.brainCol * a.beatAnt * 0.008 * exp(-r * 2.0) * silence;
 
     // ── Dynamic range — quiet passages dark ──
     col *= (0.3 + a.gated * 0.7);
@@ -240,10 +210,12 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target
     // ── Standard overlays (sparing) ──
     col += standardOverlays(p, r, a) * 0.02;
 
-        // ── Active-emitter normalization — busy music doesn't stack brighter ──
+    // ── Active-emitter normalization — busy music doesn't stack brighter ──
     col *= sqrt(16.0 / seActiveCount(emit));
-    // ── Soft tone mapping (Reinhard) — no hard clamp, preserves color ──
-    col = softReinhard(col);
+
+    // ── HDR limiter per pipeline rules ──
+    float maxC = max(col.r, max(col.g, col.b));
+    if (maxC > 1.2) col *= 1.2 / maxC;
 
     col *= silence;
 

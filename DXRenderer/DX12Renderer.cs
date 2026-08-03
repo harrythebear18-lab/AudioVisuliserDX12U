@@ -164,8 +164,8 @@ public class DX12Renderer : IRenderer
         { "fluid_dynamics", "Fluid Dynamics" },
         { "lightning_storm", "Spectral Masking Cascade" },
         { "neon_cityscape", "Neon Cityscape" },
-        { "spectrum_waterfall", "Spatial Audio Sonar" },
-        { "cosmic_web", "Gravitational Wavefield" },
+        { "spectrum_waterfall", "Spectral Helix" },
+        { "cosmic_web", "Resonance Chamber" },
         { "laser_show", "Resonance Field" },
         { "neural_synapse", "Neural Synapse Storm" },
         { "hologram_projector", "Acoustic Hologram Projector" },
@@ -1029,8 +1029,8 @@ public class DX12Renderer : IRenderer
             "fluid_dynamics",    // 32. Fluid Dynamics — Navier-Stokes volumetric fluid
             "lightning_storm",   // 33. Spectral Masking Cascade — auditory masking visualization
             "neon_cityscape",    // 34. Neon Cityscape — synthwave skyline + reflections
-            "spectrum_waterfall",// 35. Spatial Audio Sonar — 360° immersive 3D sonar display
-            "cosmic_web",        // 36. Gravitational Wavefield — spacetime fabric with gravitational wells
+            "spectrum_waterfall",// 35. Spectral Helix — DNA-style double helix with band nodes
+            "cosmic_web",        // 36. Resonance Chamber — inside octagonal audio cavity
             "laser_show",        // 37. Resonance Field — 3D Chladni standing wave patterns at spatial audio positions
             "neural_synapse",    // 38. Neural Synapse Storm — 3D neural network with synapse firing
             "hologram_projector",// 39. Acoustic Hologram Projector — volumetric hologram table

@@ -1,19 +1,31 @@
 // RS by Resonance — RapidSpectrum Visualizer
-// HUD Mode 42: Spectral Aurora Cathedral — volumetric aurora in gothic space
+// HUD Mode 42: Spectral Aurora Cathedral — volumetric aurora curtains
 // VR Layer mode. Uses spatial_encoder.hlsl with SE_PROFILE_PSYCHOACOUSTIC.
 //
-// 48 emitters (8 bands × 3 sub × L/R) placed as psychoacoustic sources.
-// Emitters drive aurora curtain positions — each band = one curtain.
-// Bass = curtain base width, mids = curtain wave/sway, highs = curtain top shimmer.
-// Beat = light pillars through stained glass. Kick = stained glass illumination.
-// Transient = aurora ripple.
+// Optimized: direct curtain projection (no raymarch), no seEmitGlowDepth/VR,
+// no seLinkLR, no softReinhard. Full audio brain data.
 //
-// World: grid floor as cathedral floor, fog density 0.05, dark ambient.
-// Camera: looking up at aurora from cathedral floor, FOV 0.8 (VR: head pose from OpenXR).
-// Visual: volumetric raymarched aurora curtains at emitter X positions, gothic pillars.
+// Audio-to-visual mapping:
+//   b0-b7       -> 8 aurora curtain positions and energy
+//   beat        -> light pillars through stained glass
+//   kick        -> stained glass illumination
+//   transient   -> aurora ripple
+//   envelope    -> curtain sway
+//   stereoBal   -> camera orbit
+//   stereoWid   -> curtain spread
+//   stereoDiff  -> camera height
+//   phaseCoh    -> L/R curtain symmetry
+//   section     -> camera repositioning
+//   phraseBeat  -> slow curtain breathing
+//   speechMode  -> vocal curtain boost
+//   calmMode    -> reduced turbulence
+//   brightness  -> curtain glow
+//   glow        -> ambient aurora glow
+//   colorPulse  -> hue shift
+//   beatAnt     -> anticipatory swell
 //
-// DSP: LUFS→aurora brightness, crest→curtain edge sharpness, THD→atmospheric turbulence, phase→L/R symmetry.
-// HDR output to Layer 0. No local postfx. Pipeline owns bloom/tonemap.
+// DSP: LUFS->brightness, crest->edge sharpness, THD->turbulence, phase->symmetry.
+// HDR output to Layer 0. No local postfx.
 
 #include "include/spatial_encoder.hlsl"
 #include "include/layers.hlsl"
@@ -57,10 +69,12 @@ void computeCurtainsFromEmitters(out AuroraCurtain curtains[SE_N_BANDS], SeEmitt
         }
         avgEnergy /= float(SE_N_SUB * 2);
 
-        curtains[band].xCenter = emit[idx].worldPos.x * 1.2;
-        curtains[band].yBase = 0.5;
-        curtains[band].yTop = lerp(2.0, 4.0, bt) + avgEnergy * 0.5;
-        curtains[band].width = lerp(0.8, 0.3, bt) * (1.0 + a.stereoWid * 0.3);
+        // Spread curtains across full width — band 0 at far left, band 7 at far right
+        // with stereo balance offset and emitter-derived jitter
+        curtains[band].xCenter = lerp(-3.0, 3.0, bt) + a.stereoBal * 0.5 + emit[idx].worldPos.x * 0.3;
+        curtains[band].yBase = 0.0;
+        curtains[band].yTop = lerp(3.0, 5.0, bt) + avgEnergy * 0.8;
+        curtains[band].width = lerp(1.0, 0.4, bt) * (1.0 + a.stereoWid * 0.4);
         curtains[band].energy = avgEnergy;
         curtains[band].color = emit[idx].color;
     }
@@ -148,9 +162,9 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target
     if (VR_ACTIVE) {
         cam = seCameraVR();
     } else {
-        float FOV = 0.8;
-        float camAng = a.section * 0.3 + a.stereoBal * 0.15;
-        float3 camPos = float3(sin(camAng) * 1.0, 0.0, cos(camAng) * 1.0);
+        float FOV = 0.85;
+        float camAng = a.section * 0.3 + a.stereoBal * 0.15 + Time * 0.02 * a.motSpeed;
+        float3 camPos = float3(sin(camAng) * 1.5, 0.0 + a.stereoDiff * 0.1, cos(camAng) * 1.5);
         cam = seCamera(camPos, float3(0, 2.5, 0), FOV);
     }
 
@@ -160,6 +174,9 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target
     params.heightScale = 2.5;
     params.depthScale = 2.0;
     params.jitterAmt = 0.15 + thd * 0.25;
+    params.stereoWid = a.stereoWid;
+    params.stereoBal = a.stereoBal;
+    params.motionSpeed = 0.8 * (1.0 - a.calmMode * 0.3);
 
     float bands[8] = { a.b0, a.b1, a.b2, a.b3, a.b4, a.b5, a.b6, a.b7 };
 
@@ -181,34 +198,100 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target
 
     // ── Background — dark cathedral + world env ──
     float3 col = seWorldEnvironment(p, cam, world, a, kickSurge, silence);
-    col += starfield(uv, a) * 0.003;
+    col += starfield(uv, a) * 0.005;
+    float nebula = fbm2_4(p * 0.5 + Time * 0.002 * a.motSpeed);
+    col += a.brainCol * nebula * 0.004 * a.ambient * a.ambActive * silence;
 
-    // ── Volumetric raymarch through aurora ──
-    float3 rd = normalize(cam.fwd + p.x * cam.right * cam.fov + p.y * cam.up * cam.fov);
-    float t = 0.1;
-    float3 accum = float3(0, 0, 0);
-    float transmittance = 1.0;
-    float stepSize = 0.1;
+    // ── Aurora curtains — direct projection (no raymarch) ──
+    // Each curtain is a vertical sheet at a specific X position in world space.
+    // Project curtain as a line from yBase to yTop at xCenter, sample at multiple heights.
+    [unroll] for (int band = 0; band < SE_N_BANDS; band++) {
+        if (curtains[band].gate < 0.01) continue;
 
-    [loop] for (int i = 0; i < 16; i++) {
-        float3 sp = cam.pos + rd * t;
-        if (sp.y > 5.0 || length(sp.xz) > 4.0) break;
+        float bt = float(band) / float(SE_N_BANDS - 1);
+        float3 curCol = curtains[band].color;
+        curCol = lerp(curCol, curCol.bgr, a.colorPulse * 0.02);
 
-        float density = auroraDensity(sp, curtains, bands, envelope, thd, beatPulse, silence);
-        density *= smoothstep(0.002, 0.02, density);
+        // Vocal band boost
+        float vocalWeight = smoothstep(2.5, 3.5, float(band)) * (1.0 - smoothstep(5.0, 6.0, float(band)));
+        float curEnergy = curtains[band].energy;
+        curEnergy += a.speechMode * vocalWeight * 0.2;
+        curEnergy += a.beatAnt * 0.15;
+        curEnergy += a.glow * 0.04;
+        curEnergy *= (0.7 + a.brightness * 0.3);
+        curEnergy *= (1.0 - a.calmMode * 0.3);
 
-        if (density > 0.003) {
-            float3 pointCol = auroraColor(sp, curtains, a);
-            pointCol *= density * (0.3 + envelope * 0.2) * (1.0 + lufs * 0.15);
+        if (curEnergy < 0.02) continue;
 
-            float sigma = density * 0.15 + 0.005;
-            transmittance *= exp(-sigma * stepSize);
-            accum += pointCol * transmittance * stepSize * 1.0;
+        // Sample curtain at 8 heights — project each to screen
+        [unroll] for (int yi = 0; yi < 8; yi++) {
+            float yFrac = (float(yi) + 0.5) / 8.0;
+            float worldY = lerp(curtains[band].yBase, curtains[band].yTop, yFrac);
+
+            // Sway — envelope-driven horizontal displacement
+            float sway = sin(worldY * 2.0 + Time * 1.5 * (0.5 + bt)) * envelope * 0.3;
+            sway += cos(worldY * 3.5 + Time * 2.0) * bands[2] * 0.2;
+            sway *= (1.0 - a.calmMode * 0.5);
+
+            // THD turbulence
+            float turb = fbm2_4(float2(worldY * 3.0 + Time * 0.5, curtains[band].xCenter * 2.0)) * thd * 0.15;
+            turb *= (1.0 - a.calmMode * 0.5);
+
+            float worldX = curtains[band].xCenter + sway + turb;
+            float3 worldPos = float3(worldX, worldY, 0.0);
+
+            float3 toPt = worldPos - cam.pos;
+            float depth = dot(toPt, cam.fwd);
+            if (depth < 0.1) continue;
+
+            float sx = dot(toPt, cam.right) / (depth * cam.fov);
+            float sy = dot(toPt, cam.up) / (depth * cam.fov);
+            float2 scrPos = float2(sx, sy);
+
+            float2 diff = p - scrPos;
+            float dist2 = dot(diff, diff);
+
+            // Curtain width narrows toward top
+            float curW = curtains[band].width * (1.0 - yFrac * 0.3);
+            curW /= max(depth * 0.3, 0.2);
+            float curW2 = curW * curW;
+
+            if (dist2 > curW2 * 6.0) continue;
+
+            float depthFade = exp(-depth * 0.04);
+
+            // Glow profile
+            float glow = exp(-dist2 / (curW2 * 0.5));
+            float core = exp(-dist2 / (curW2 * 0.15));
+
+            // Y falloff — curtain fades at base and top
+            float yFade = sin(yFrac * PI);
+
+            // Shimmer at top — high band driven
+            float shimmer = bands[7] * pow(yFrac, 3.0) * 0.3;
+
+            // FBM texture on curtain
+            float2 surfUV = float2(yFrac * 4.0, worldX * 2.0 + Time * 0.3);
+            float texture = fbm2_4(surfUV);
+            texture += transientAmt * fbm2_4(surfUV * 3.0 + Time * 5.0) * 0.3;
+            texture = lerp(texture, 0.5, a.calmMode * 0.5);
+
+            float intensity = curEnergy * yFade * (1.0 + lufs * 0.2);
+
+            col += curCol * (glow * 0.2 + core * 0.3) * intensity * depthFade * silence;
+            col += curCol * texture * glow * intensity * 0.08 * depthFade * silence;
+            col += curCol * shimmer * core * intensity * 0.1 * depthFade * silence;
+
+            // Beat pulse traveling up curtain
+            float beatPos = a.beatPhase;
+            float beatDist = abs(yFrac - beatPos);
+            float beatWave = exp(-beatDist * beatDist * 20.0) * beatPulse;
+            col += curCol * core * beatWave * intensity * 0.2 * depthFade * silence;
+
+            // Crest sharpens edges
+            col += curCol * core * crest * intensity * 0.05 * depthFade * silence;
         }
-        t += stepSize;
     }
-
-    col += accum * silence;
 
     // ── Cathedral pillars — gothic arches at edges ──
     {
@@ -219,29 +302,20 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target
             float2 scrPillar = float2(dot(toPillar, cam.right) / (pillarDepth * cam.fov),
                                       dot(toPillar, cam.up) / (pillarDepth * cam.fov));
             float pillarDist = length(p - scrPillar);
-            float pillarGlow = exp(-pillarDist * pillarDist * 10.0) * 0.015;
+            float pillarGlow = exp(-pillarDist * pillarDist * 10.0) * 0.02;
             col += a.brainCol3 * pillarGlow * silence;
         }
-    }
-
-    // ── Emitter glow — depth-aware, VR or desktop ──
-    if (VR_ACTIVE) {
-        float3 headPos = float3(VRHeadPos.xyz);
-        [loop] for (int j = 0; j < SE_NUM_OBJ; j++) {
-            if (emit[j].active < 0.01 || emit[j].depth < 0.1) continue;
-            col += seEmitGlowVR(p, emit[j], world, headPos, silence);
+        // Mirror pillar
+        float3 pillarPos2 = float3(-3.0, 2.0, 0);
+        float3 toPillar2 = pillarPos2 - cam.pos;
+        float pillarDepth2 = dot(toPillar2, cam.fwd);
+        if (pillarDepth2 > 0.1) {
+            float2 scrPillar2 = float2(dot(toPillar2, cam.right) / (pillarDepth2 * cam.fov),
+                                       dot(toPillar2, cam.up) / (pillarDepth2 * cam.fov));
+            float pillarDist2 = length(p - scrPillar2);
+            float pillarGlow2 = exp(-pillarDist2 * pillarDist2 * 10.0) * 0.02;
+            col += a.brainCol3 * pillarGlow2 * silence;
         }
-    } else {
-        [loop] for (int j = 0; j < SE_NUM_OBJ; j++) {
-            if (emit[j].active < 0.01 || emit[j].depth < 0.1) continue;
-            col += seEmitGlowDepth(p, emit[j], world, lufs, crest, beatPulse,
-                                   a.beatPhase, kickSurge, transientAmt, silence);
-        }
-    }
-
-    // ── L↔R links ──
-    [loop] for (int lb = 0; lb < SE_N_BANDS; lb++) {
-        col += seLinkLR(p, emit, lb, phaseCorr, phaseCoh, silence);
     }
 
     // ── Listener focal point ──
@@ -256,24 +330,26 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target
     // ── Transient — aurora ripple ──
     col += a.brainCol2 * transientAmt * 0.025 * sin(r * 20.0 - Time * 10.0) * silence;
 
-    // ── Mode-specific overlays — subtle ──
+    // ── Phrase breathing ──
+    float phraseMod = sin(a.phraseBeat * PI * 2.0) * 0.02 + 0.02;
+    col += a.brainCol * phraseMod * silence;
+
+    // ── Beat ring ──
     float ringDist = abs(r - a.beatPhase * 0.7);
     col += a.brainCol * exp(-ringDist * ringDist * 40.0) * beatPulse * 0.02 * silence;
-    col += a.brainCol3 * a.colorPulse * 0.015 * silence;
-    col += a.brainCol2 * a.energy * 0.01 * silence;
-    col += a.brainCol * a.punch * 0.01 * silence;
-    col += a.brainCol * a.beatAnt * 0.008 * exp(-r * 2.0) * silence;
 
     // ── Dynamic range ──
-    col *= (0.3 + a.gated * 0.7);
+    col *= (0.5 + a.gated * 0.5);
 
     // ── Standard overlays ──
-    col += standardOverlays(p, r, a) * 0.02;
+    col += standardOverlays(p, r, a) * 0.015;
 
-        // ── Active-emitter normalization — busy music doesn't stack brighter ──
+    // ── Active-emitter normalization ──
     col *= sqrt(16.0 / seActiveCount(emit));
-    // ── Soft tone mapping (Reinhard) — no hard clamp, preserves color ──
-    col = softReinhard(col);
+
+    // ── HDR limiter ──
+    float maxC = max(col.r, max(col.g, col.b));
+    if (maxC > 1.2) col *= 1.2 / maxC;
 
     col *= silence;
 

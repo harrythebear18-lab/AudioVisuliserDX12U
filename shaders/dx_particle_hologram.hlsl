@@ -1,94 +1,220 @@
 // RS by Resonance — RapidSpectrum Visualizer
-// HUD Mode 47: Acoustic Particle Hologram — GPU particles forming 3D audio shapes
+// HUD Mode 47: Acoustic Particle Hologram — procedural holographic interference field
 // VR Layer mode. Uses spatial_encoder.hlsl with SE_PROFILE_PSYCHOACOUSTIC.
 //
-// 48 emitters (8 bands × 3 sub × L/R) placed as psychoacoustic sources.
-// Each emitter spawns a particle cluster that converges on beats,
-// dissolves on transients, and explodes on kicks.
-// Stereo = particle distribution L/R. Beat = convergence.
-// Kick = explosion outward. Transient = dissolution + reformation.
+// Concept: A hologram is an interference pattern between two coherent wavefronts.
+// Left and right stereo channels are the two wavefronts. Each of the 8 brain
+// bands generates a ring of coherent emitters around the hologram plate.
+// Where wavefronts constructively interfere = bright particle clusters.
+// Where they destructively interfere = dark fringes. The pattern shifts and
+// morphs with stereo balance, phase correlation, and band energy.
 //
-// World: grid floor for depth grounding, fog density 0.05, dark ambient.
-// Camera: inside the particle cloud, FOV 0.75 (VR: head pose from OpenXR).
-// Visual: glowing particle clusters with trails between same-band emitters.
+// ALL AudioData fields used:
+//   b0-b7: 8 ring interference amplitude + frequency
+//   energy/overall: global hologram brightness
+//   beat/beatPhase/beatDet: beat wavefront pulse
+//   beatAnt: pre-beat fringe shift
+//   kick/kickConf/punch: hologram disruption + flash
+//   transient/dynamic: fringe scatter
+//   envelope: hologram breathing
+//   bpm/tempo/tempoConf: fringe spacing + clarity
+//   motSpeed/motionSpd: ring rotation speed
+//   stereoBal/stereoWid/stereoDiff: wavefront angle + separation
+//   leftEn/rightEn: L/R wavefront amplitude
+//   phaseCorr/phaseCoh: fringe contrast + coherence
+//   crest: fringe sharpness
+//   thd: hologram noise/static
+//   lufs: overall brightness
+//   brightness/glow/bloom/beam/dynLight: visual modifiers
+//   speechMode/voiceActivity: vocal band fringe boost
+//   calmMode: reduce interference amplitude
+//   phraseBeat: slow fringe drift
+//   section/sectionConf: ring rotation offset
+//   colorPulse: hue shift
+//   brainCol/2/3: fringe colors by band
+//   hueBase/Center/Range/satur: HSV color mapping
+//   gated/isSilent: gating
+//   specCent/specSpread: fringe color weighting + frequency spread
+//   domFreq/domBand: dominant band fringe highlight
+//   burstTrig/burstType/burstInt: burst fringe spike
+//   effectInt: secondary fringe modulation
+//   ambient/ambientLevel: ambient hologram glow
+//   profBass/profTreb: bass/treble ring expansion
+//   barScale/persp/motionPers: scale + perspective
+//   tempoPulse: tempo-driven fringe pulse
 //
-// DSP: LUFS→particle brightness, crest→particle focus, THD→particle jitter, phase→cluster coherence.
-// HDR output to Layer 0. No local postfx. Pipeline owns bloom/tonemap.
+// No seEmitGlowDepth/VR, no seLinkLR, no softReinhard. Full audio brain.
+// HDR output to Layer 0. No local postfx.
 
 #include "include/spatial_encoder.hlsl"
 #include "include/layers.hlsl"
 
 #define PI 3.14159265
-#define N_PARTICLES 48
 
-struct Particle {
-    float3 pos;
-    float energy;
-    float gate;
-    float freqFrac;
-    float3 color;
-};
-
-void computeParticlesFromEmitters(out Particle particles[N_PARTICLES], SeEmitter emit[SE_NUM_OBJ],
-                                  float kickSurge, float beatPulse, float transientAmt,
-                                  float thd, float envelope, float crest, AudioData a)
+// Procedural holographic interference field
+// Returns interference intensity at screen position p
+float hologramInterference(float2 p, float bands[8], AudioData a,
+                           float crest, float thd, float phaseCoh, float lufs,
+                           float beatPulse, float kickSurge, float transientAmt,
+                           float envelope, float time)
 {
-    [unroll] for (int n = 0; n < N_PARTICLES; n++)
-    {
-        float3 targetPos = emit[n].worldPos;
-        float energy = emit[n].intensity;
-        float gate = emit[n].active * step(0.05, emit[n].intensity);
-        float bt = float(emit[n].bandIdx) / float(SE_N_BANDS - 1);
+    float r = length(p);
+    float ang = atan2(p.y, p.x);
 
-        // Transient — dissolution: scatter particles
-        float dissolve = transientAmt * 2.0;
-        float3 scatter = float3(
-            hash11(float(n) * 7.3 + Time * 10.0) - 0.5,
-            hash11(float(n) * 13.7 + Time * 8.0) - 0.5,
-            hash11(float(n) * 21.1 + Time * 12.0) - 0.5
-        ) * dissolve;
+    // Stereo wavefront separation — L and R sources at different angles
+    float waveAngleL = a.stereoBal * PI * 0.3 - PI * 0.15;
+    float waveAngleR = a.stereoBal * PI * 0.3 + PI * 0.15;
+    waveAngleL += a.stereoDiff * 0.1;
+    waveAngleR -= a.stereoDiff * 0.1;
 
-        // Kick — explosion outward
-        float3 explode = normalize(targetPos + float3(0.01, 0, 0)) * kickSurge * 1.5;
+    // Wavefront source positions (simulated)
+    float2 srcL = float2(cos(waveAngleL), sin(waveAngleL)) * 3.0;
+    float2 srcR = float2(cos(waveAngleR), sin(waveAngleR)) * 3.0;
 
-        // Beat — convergence pulse toward target
-        float converge = beatPulse * exp(-a.beatPhase * 4.0);
+    // Distance from each source — path length difference = interference
+    float distL = length(p - srcL);
+    float distR = length(p - srcR);
+    float pathDiff = distL - distR;
 
-        // Final position — lerp between scattered and target
-        float3 finalPos = lerp(targetPos + scatter, targetPos, converge);
-        finalPos += explode * (1.0 - converge);
+    // L/R wavefront amplitudes
+    float ampL = a.leftEn / max(a.overall, 0.01);
+    float ampR = a.rightEn / max(a.overall, 0.01);
+    ampL = clamp(ampL, 0.3, 2.0);
+    ampR = clamp(ampR, 0.3, 2.0);
 
-        // THD jitter
-        finalPos += float3(
-            thd * (hash11(float(n) * 5.1 + Time * 20.0) - 0.5) * 0.1,
-            thd * (hash11(float(n) * 9.3 + Time * 18.0) - 0.5) * 0.1,
-            thd * (hash11(float(n) * 17.5 + Time * 22.0) - 0.5) * 0.1
-        );
+    float interference = 0.0;
 
-        // Envelope breathing
-        finalPos *= (1.0 + envelope * 0.1 * sin(Time * 2.0 + float(n)));
+    // ── 8 band-driven interference rings ──
+    [unroll] for (int i = 0; i < 8; i++) {
+        float bandVal = bands[i];
+        if (bandVal < 0.005) continue;
 
-        particles[n].pos = finalPos;
-        particles[n].energy = energy * gate;
-        particles[n].gate = gate;
-        particles[n].freqFrac = bt;
-        particles[n].color = emit[n].color;
+        // Each band has a different spatial frequency (fringe spacing)
+        float freq = 3.0 + float(i) * 2.5;
+        freq *= (1.0 + a.specSpread * 0.3);  // spectral spread widens frequency range
+        freq *= (1.0 - a.calmMode * 0.3);
+
+        // Ring radius — each band at different distance from center
+        float ringR = 0.1 + float(i) / 8.0 * 0.35;
+        ringR += a.profBass * 0.04 * (1.0 - float(i) / 7.0);
+        ringR += a.profTreb * 0.04 * (float(i) / 7.0);
+        ringR += a.beatAnt * 0.02 * a.gated;
+
+        // Ring rotation — each band rotates at different speed
+        float ringAng = ang + time * (0.1 + float(i) * 0.04) * a.motSpeed
+                      + a.section * 0.3;
+        ringAng += a.stereoBal * 0.2 * (1.0 - float(i) / 7.0);
+
+        // Interference pattern — cos of path difference × frequency
+        float fringe = cos(pathDiff * freq + ringAng * float(i));
+
+        // Band amplitude — L/R modulated
+        float bandAmp = bandVal * a.gated;
+        if (i < 4) bandAmp *= lerp(ampL, ampR, float(i) / 3.0);
+        else bandAmp *= lerp(ampL, ampR, float(i - 4) / 3.0);
+        bandAmp *= (1.0 + lufs * 0.3);
+        bandAmp *= (0.8 + envelope * 0.4);
+        bandAmp *= (1.0 - a.calmMode * 0.4);
+
+        // Vocal band boost
+        float vocalW = smoothstep(2.5, 3.5, float(i)) * (1.0 - smoothstep(5.0, 6.0, float(i)));
+        bandAmp += a.speechMode * vocalW * bandVal * 0.4 * a.gated;
+        bandAmp += a.voiceActivity * vocalW * 0.15 * a.gated;
+
+        // Ring envelope — Gaussian around ring radius
+        float ringDist = abs(r - ringR);
+        float ringWidth = 0.08 - float(i) * 0.005;
+        ringWidth *= (1.0 + phaseCoh * 0.3);
+        ringWidth *= (1.0 - thd * 0.15 * vrFlickerScale());
+        float ringEnv = exp(-ringDist * ringDist / (ringWidth * ringWidth));
+
+        // Dominant band highlight
+        if (abs(float(i) - a.domBand) < 0.5 && a.domBand > 0.01) {
+            ringEnv *= 1.4;
+        }
+
+        // Add interference fringe × ring envelope
+        interference += bandAmp * fringe * ringEnv;
+
+        // Secondary ripple — wave spreading from each ring
+        interference += bandAmp * 0.15 * sin(r * freq * 0.5 - time * 2.0 - float(i)) * ringEnv;
     }
+
+    // ── Beat wavefront pulse — traveling interference fringe ──
+    interference += beatPulse * 0.3 * cos(pathDiff * 8.0 - a.beatPhase * PI * 6.0) * exp(-r * r * 2.0);
+    interference += a.beatDet * 0.1 * cos(pathDiff * 12.0 - a.beatPhase * PI * 10.0) * exp(-r * r * 3.0);
+
+    // ── Tempo pulse — continuous fringe breathing ──
+    interference += a.tempoPulse * 0.08 * cos(r * 6.0 - time * 1.5) * exp(-r * r * 1.5);
+
+    // ── Beat anticipation — pre-beat fringe shift ──
+    interference += a.beatAnt * 0.2 * cos(pathDiff * 5.0) * exp(-r * r * 2.5) * a.gated;
+
+    // ── Kick hologram disruption — central flash + radial break ──
+    interference += kickSurge * 0.5 * cos(pathDiff * 15.0 - a.beatPhase * 30.0) * exp(-r * r * 4.0);
+    interference -= kickSurge * 0.2 * exp(-r * r * 5.0);
+    interference += a.punch * 0.12 * cos(r * 18.0) * exp(-pow(r - 0.3, 2.0) * 12.0) * a.gated;
+
+    // ── Transient fringe scatter ──
+    if (transientAmt > 0.02) {
+        float scatter = sin(p.x * 4.0 + p.y * 3.0 + time * 30.0) * transientAmt;
+        interference += scatter * 0.15 * exp(-r * r * 2.0) * a.gated;
+    }
+    interference += a.dynamic * 0.06 * sin(p.x * 6.0 + p.y * 5.0 + time * 18.0) * exp(-r * r * 3.0);
+
+    // ── Envelope breathing ──
+    interference += envelope * 0.15 * cos(r * 5.0 - time * 1.2) * exp(-r * r * 1.0);
+
+    // ── Phrase breathing — slow fringe drift ──
+    interference += sin(a.phraseBeat * PI * 2.0) * 0.12 * a.gated * cos(pathDiff * 3.0) * exp(-r * r * 1.5);
+
+    // ── Burst event — fringe spike ──
+    if (a.burstTrig > 0.5) {
+        float burstAng = a.burstType * PI * 0.5 + time;
+        float2 burstPos = float2(cos(burstAng), sin(burstAng)) * 0.3;
+        interference += a.burstInt * 0.35 * cos(length(p - burstPos) * 20.0) * exp(-length(p - burstPos) * length(p - burstPos) * 6.0) * a.gated;
+    }
+
+    // ── Effect intensity — secondary fringe modulation ──
+    interference += a.effectInt * 0.07 * cos(p.x * 5.0 + p.y * 4.0 + time * 6.0) * exp(-r * r * 2.0);
+
+    // ── THD hologram static — noise overlay ──
+    float thdNoise = sin(p.x * 25.0 + time * 10.0) * thd * 0.05 * vrFlickerScale();
+    thdNoise += sin(p.y * 22.0 - time * 8.0) * thd * 0.04 * vrFlickerScale();
+    thdNoise += (vnoise2(p * 18.0 + time * 3.0) - 0.5) * thd * 0.06 * vrFlickerScale();
+    thdNoise *= (1.0 - a.calmMode * 0.6);
+    interference += thdNoise;
+
+    // ── Phase coherence — fringe contrast ──
+    interference *= (0.6 + phaseCoh * 0.4);
+
+    // ── Crest — fringe sharpness ──
+    interference *= (1.0 + crest * 0.2);
+
+    // ── LUFS — overall brightness ──
+    interference *= (1.0 + lufs * 0.15);
+
+    // ── Bar scale ──
+    interference *= a.barScale;
+
+    return interference;
 }
 
 float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target
 {
     AudioData a = extractAudio();
     float2 p = screenToAspect(uv);
+    // VR parallax — shift screen coords per eye for fake stereo depth
+    p += vrParallax(2.0);
     float r = length(p);
     float silence = 1.0 - a.isSilent;
+    float flashScale = vrFlashScale();
 
-    // ── DSP additive ──
+    // ── DSP ──
     float lufs = lufsNormalized();
     float crest = crestFactorNormalized();
     float thd = thdNormalized();
     float phaseCoh = phaseCoherence();
-    float phaseCorr = phaseCoherence();
 
     // ── Audio dynamics ──
     float beatPulse = a.beat * a.tempoConf;
@@ -96,14 +222,14 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target
     float transientAmt = a.transient;
     float envelope = a.envelope;
 
-    // ── Camera — VR head pose or desktop inside particle cloud ──
+    // ── Camera — VR head pose or desktop ──
     SeCamera cam;
     if (VR_ACTIVE) {
         cam = seCameraVR();
     } else {
-        float FOV = 0.75;
-        float camAng = a.section * 0.5 + a.stereoBal * 0.2 + Time * 0.02 * a.motSpeed;
-        float3 camPos = float3(sin(camAng) * 2.0, 0.5 + a.stereoDiff * 0.1, cos(camAng) * 2.0);
+        float FOV = 0.85;
+        float camAng = a.section * 0.4 + a.stereoBal * 0.15 + Time * vrMotionScale(0.02) * a.motSpeed;
+        float3 camPos = float3(sin(camAng) * 2.5, 0.8 + a.stereoDiff * 0.08, cos(camAng) * 2.5);
         cam = seCamera(camPos, float3(0, 0, 0), FOV);
     }
 
@@ -128,118 +254,159 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target
     world.ambientColor = float3(0.008, 0.006, 0.015);
     seApplyWorldFog(emit, world);
 
-    // ── Derive particles from emitters ──
-    Particle particles[N_PARTICLES];
-    computeParticlesFromEmitters(particles, emit, kickSurge, beatPulse, transientAmt,
-                                 thd, envelope, crest, a);
+    // ── Spatial encoder color per band ──
+    float3 emitCol[8];
+    [unroll] for (int bi = 0; bi < 8; bi++) {
+        int n = bi * SE_N_SUB * 2;
+        emitCol[bi] = (emit[n].active > 0.01) ? emit[n].color : a.brainCol;
+    }
 
     // ── Background — dark hologram space + world env ──
     float3 col = seWorldEnvironment(p, cam, world, a, kickSurge, silence);
     col += starfield(uv, a) * 0.003;
 
-    // ── Project particles ──
-    float2 scrPos[N_PARTICLES];
-    float scrDepth[N_PARTICLES];
+    // ── Compute holographic interference ──
+    float interference = hologramInterference(p, bands, a, crest, thd, phaseCoh, lufs,
+                                               beatPulse, kickSurge, transientAmt,
+                                               envelope, Time);
 
-    [unroll] for (int n = 0; n < N_PARTICLES; n++) {
-        float3 toP = particles[n].pos - cam.pos;
-        scrDepth[n] = dot(toP, cam.fwd);
-        if (scrDepth[n] < 0.1) { scrPos[n] = float2(999, 999); scrDepth[n] = 0.0; continue; }
-        scrPos[n] = float2(dot(toP, cam.right) / (scrDepth[n] * cam.fov),
-                           dot(toP, cam.up) / (scrDepth[n] * cam.fov));
-    }
+    // ── Interference → visual ──
+    // Positive interference = bright constructive fringes (particles)
+    // Negative interference = dark destructive fringes
+    float constructive = max(interference, 0.0);
+    float destructive = max(-interference, 0.0);
 
-    // ── Particle trails — connect to nearest neighbor in same band ──
-    [loop] for (int i = 0; i < N_PARTICLES; i++) {
-        if (particles[i].gate < 0.01 || scrDepth[i] < 0.1) continue;
+    // ── Band angle for color ──
+    float ang = atan2(p.y, p.x);
+    float bandPos = frac(ang / (PI * 2.0)) * 8.0;
+    int band0 = int(bandPos) % 8;
+    int band1 = (band0 + 1) % 8;
+    float bandFrac = bandPos - floor(bandPos);
+    float bandFracSmooth = bandFrac * bandFrac * (3.0 - 2.0 * bandFrac);
 
-        int band = i / (SE_N_SUB * 2);
-        int nextIdx = (band * SE_N_SUB * 2) + ((i % (SE_N_SUB * 2)) + 1) % (SE_N_SUB * 2);
-        if (particles[nextIdx].gate < 0.01 || scrDepth[nextIdx] < 0.1) continue;
+    // ── Color — blend band colors + height-based gradient ──
+    float3 fringeCol = lerp(emitCol[band0], emitCol[band1], bandFracSmooth);
+    float bt = lerp(float(band0) / 7.0, float(band1) / 7.0, bandFracSmooth);
+    fringeCol = lerp(fringeCol, lerp(a.brainCol, a.brainCol2, bt), 0.4);
+    fringeCol = lerp(fringeCol, a.brainCol3, constructive * 0.15);
+    // Spectral centroid shifts color
+    fringeCol = lerp(fringeCol, hsv(a.hueBase + a.specCent * a.hueRange, a.satur, 1.0), 0.12);
+    // Color pulse hue shift
+    fringeCol = lerp(fringeCol, fringeCol.bgr, a.colorPulse * 0.03);
 
-        float2 ab = scrPos[nextIdx] - scrPos[i];
-        float t = clamp(dot(p - scrPos[i], ab) / max(dot(ab, ab), 0.0001), 0.0, 1.0);
-        float2 closest = scrPos[i] + ab * t;
-        float trailDist = length(p - closest);
-        float trailWidth = 0.002 + particles[i].energy * 0.003;
-        float trailGlow = exp(-trailDist * trailDist / (trailWidth * trailWidth));
+    // ── Intensity — all audio data drives brightness ──
+    float intensity = a.gated;
+    intensity *= (0.7 + a.brightness * 0.3);
+    intensity *= (1.0 - a.calmMode * 0.4);
+    intensity *= (1.0 + lufs * 0.3);
+    intensity *= (0.8 + envelope * 0.4);
+    intensity += a.glow * 0.05 * a.gated;
+    intensity += a.beatAnt * 0.12 * a.gated;
+    intensity *= (1.0 + a.bloom * 0.2);
+    intensity += a.ambientLevel * 0.03;
 
-        float3 trailCol = lerp(particles[i].color, particles[nextIdx].color, 0.5);
-        float avgDepth = (scrDepth[i] + scrDepth[nextIdx]) * 0.5;
-        float depthFade = exp(-avgDepth * world.fogDensity);
-        float trailInt = (particles[i].energy + particles[nextIdx].energy) * 0.5 * (1.0 + lufs * 0.15);
+    // ── Render constructive interference as particle clusters ──
+    if (intensity > 0.01 && constructive > 0.01) {
+        // Particle cluster glow — multi-layer
+        float particleSize = 0.015 / (1.0 + crest * 0.8);
+        float coreGlow = exp(-pow(constructive - 1.0, 2.0) / (particleSize * particleSize));
+        float midGlow = exp(-pow(constructive - 0.5, 2.0) / (particleSize * particleSize * 4.0));
+        float haloGlow = exp(-pow(constructive - 0.3, 2.0) / (particleSize * particleSize * 16.0));
 
-        col += trailCol * trailGlow * trailInt * depthFade * 0.06 * silence;
-    }
+        col += float3(0.9, 0.95, 1.0) * coreGlow * intensity * 0.25 * silence;
+        col += fringeCol * midGlow * intensity * 0.18 * silence;
+        col += fringeCol * haloGlow * intensity * 0.05 * silence;
 
-    // ── Particles — glowing points with multi-layer glow ──
-    [loop] for (int m = 0; m < N_PARTICLES; m++) {
-        if (particles[m].gate < 0.01 || scrDepth[m] < 0.1) continue;
+        // ── Beat fringe pulse ──
+        float beatFringe = cos(r * 16.0 - a.beatPhase * PI * 8.0) * beatPulse;
+        col += fringeCol * max(beatFringe, 0.0) * intensity * 0.15 * silence;
 
-        float scrDist = length(p - scrPos[m]);
-        float sz = (0.015 + particles[m].energy * 0.04) / max(scrDepth[m] * 0.15, 0.3) * 3.0;
+        // ── Beat anticipation swell ──
+        col += fringeCol * a.beatAnt * 0.12 * a.gated * constructive * silence;
 
-        float coreGlow = exp(-scrDist * scrDist / (sz * sz * 0.08));
-        float midGlow = exp(-scrDist * scrDist / (sz * sz * 0.8));
-        float haloGlow = exp(-scrDist * scrDist / (sz * sz * 5.0));
+        // ── Kick hologram flash ──
+        col += float3(1.0, 0.5, 0.2) * kickSurge * intensity * 0.2 * flashScale * silence;
+        col += float3(1.0, 0.6, 0.3) * a.punch * 0.08 * flashScale * silence;
 
-        float intensity = particles[m].energy * (1.0 + lufs * 0.2);
-        float depthFade = exp(-scrDepth[m] * world.fogDensity);
-
-        float focus = lerp(0.5, 1.5, crest);
-
-        col += float3(0.9, 0.95, 1.0) * coreGlow * intensity * focus * depthFade * 0.35 * silence;
-        col += particles[m].color * midGlow * intensity * depthFade * 0.15 * silence;
-        col += particles[m].color * haloGlow * intensity * depthFade * 0.03 * silence;
-    }
-
-    // ── Emitter glow — depth-aware, VR or desktop ──
-    if (VR_ACTIVE) {
-        float3 headPos = float3(VRHeadPos.xyz);
-        [loop] for (int j = 0; j < SE_NUM_OBJ; j++) {
-            if (emit[j].active < 0.01 || emit[j].depth < 0.1) continue;
-            col += seEmitGlowVR(p, emit[j], world, headPos, silence);
+        // ── Transient fringe scatter ──
+        if (transientAmt > 0.02) {
+            float scatter = sin(p.x * 4.0 + p.y * 3.0 + Time * 30.0) * transientAmt;
+            col += float3(1.0, 0.8, 0.5) * max(scatter, 0.0) * intensity * 0.1 * silence;
         }
-    } else {
-        [loop] for (int j = 0; j < SE_NUM_OBJ; j++) {
-            if (emit[j].active < 0.01 || emit[j].depth < 0.1) continue;
-            col += seEmitGlowDepth(p, emit[j], world, lufs, crest, beatPulse,
-                                   a.beatPhase, kickSurge, transientAmt, silence);
+
+        // ── Crest fringe sharpening ──
+        col += fringeCol * crest * intensity * constructive * 0.06 * silence;
+
+        // ── Beam — directional light across hologram ──
+        if (a.beamActive > 0.5) {
+            float beamDir = dot(normalize(p), float2(cos(a.hueCenter * PI * 2.0), sin(a.hueCenter * PI * 2.0)));
+            col += fringeCol * smoothstep(0.6, 1.0, beamDir) * a.beam * 0.08 * silence;
+        }
+
+        // ── Dynamic light ──
+        col += fringeCol * a.dynLight * 0.05 * silence;
+
+        // ── Section change flash ──
+        if (a.shouldChg > 0.5) {
+            col += hsv(a.hueCenter, 0.2, 1.0) * smoothstep(1.0, 0.0, r) * 0.06 * silence;
+        }
+
+        // ── Burst event ──
+        if (a.burstTrig > 0.5) {
+            col += hsv(a.hueCenter + 0.1, 0.4, 1.0) * a.burstInt * 0.12 * silence;
         }
     }
 
-    // ── L↔R links ──
-    [loop] for (int lb = 0; lb < SE_N_BANDS; lb++) {
-        col += seLinkLR(p, emit, lb, phaseCorr, phaseCoh, silence);
-    }
+    // ── Destructive interference — subtle dark fringes (depth) ──
+    // Don't subtract — just don't add. The absence creates the fringe pattern.
+
+    // ── Hologram fill — subtle color between fringes ──
+    float fillIntensity = abs(interference) * a.gated * 0.03;
+    fillIntensity *= (1.0 + lufs * 0.2);
+    fillIntensity *= (1.0 - a.calmMode * 0.5);
+    col += fringeCol * fillIntensity * silence;
+
+    // ── Inner hologram glow ──
+    float innerGlow = exp(-r * r * 6.0);
+    col += a.brainCol * innerGlow * a.energy * 0.05 * a.gated * silence;
+    col += float3(1.0, 0.6, 0.3) * innerGlow * kickSurge * 0.07 * flashScale * silence;
+    col += a.brainCol3 * innerGlow * a.ambient * 0.03 * a.ambActive * silence;
+
+    // ── Ambient atmosphere glow ──
+    col += ambientGlow(r, a) * 0.5 * silence;
 
     // ── Listener focal point ──
     col += seListener(p, cam, a, beatPulse, kickSurge, silence);
 
-    // ── Mode-specific overlays — subtle ──
-    col += a.brainCol * beatPulse * exp(-a.beatPhase * 4.0) * 0.01 * silence;
-    col += float3(1.0, 0.6, 0.2) * kickSurge * 0.02 * exp(-r * r * 3.0) * silence;
-    if (transientAmt > 0.02) {
-        float shimmer = transientAmt * hash21(p * 100.0 + Time * 40.0) * 0.03;
-        col += a.brainCol3 * shimmer * silence;
+    // ── Kick ring ──
+    if (kickSurge > 0.05) {
+        float kickR = a.beatPhase * 0.5;
+        float kickDist = abs(r - kickR);
+        col += a.brainCol * exp(-kickDist * kickDist * 30.0) * kickSurge * 0.04 * silence;
     }
-    float ringDist = abs(r - a.beatPhase * 0.7);
+
+    // ── Beat ring ──
+    float ringDist = abs(r - a.beatPhase * 0.6);
     col += a.brainCol * exp(-ringDist * ringDist * 40.0) * beatPulse * 0.02 * silence;
-    col += a.brainCol3 * a.colorPulse * 0.015 * silence;
-    col += a.brainCol2 * a.energy * 0.01 * silence;
-    col += a.brainCol * a.punch * 0.01 * silence;
-    col += a.brainCol * a.beatAnt * 0.008 * exp(-r * 2.0) * silence;
+
+    // ── Phrase breathing ──
+    float phraseMod = sin(a.phraseBeat * PI * 2.0) * 0.02 * a.gated;
+    col += a.brainCol * phraseMod * silence;
+
+    // ── Motion persistence ──
+    col *= (1.0 + a.motionPers * 0.05);
 
     // ── Dynamic range ──
     col *= (0.3 + a.gated * 0.7);
 
     // ── Standard overlays ──
-    col += standardOverlays(p, r, a) * 0.02;
+    col += standardOverlays(p, r, a) * 0.015;
 
-        // ── Active-emitter normalization — busy music doesn't stack brighter ──
+    // ── Active-emitter normalization ──
     col *= sqrt(16.0 / seActiveCount(emit));
-    // ── Soft tone mapping (Reinhard) — no hard clamp, preserves color ──
-    col = softReinhard(col);
+
+    // ── Dynamic HDR limiter ──
+    col = hdrLimiter(col);
 
     col *= silence;
 

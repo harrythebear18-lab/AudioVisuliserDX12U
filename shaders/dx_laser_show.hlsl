@@ -1,22 +1,32 @@
 // RS by Resonance — RapidSpectrum Visualizer
-// Mode 37: Resonance Field — 4D Chladni standing-wave interference from psychoacoustic sources
+// HUD Mode 38: Resonance Field — Chladni standing-wave interference
 // VR Layer mode. Uses spatial_encoder.hlsl with SE_PROFILE_PSYCHOACOUSTIC.
 //
-// Sound sources are placed where the listener's brain perceives them in 3D space:
-//   Azimuth  ← stereo pan (HRTF-inspired horizontal plane)
-//   Elevation ← frequency band (bass=low, treble=high, non-linear pow 0.85)
-//   Distance  ← energy (loud=close, quiet=far)
-//
-// Chladni standing-wave patterns emanate from each psychoacoustic source position.
+// Chladni standing-wave patterns emanate from psychoacoustic source positions.
 // Constructive interference = bright antinodes, destructive = dark nodes.
-// Depth fog + far-field desaturation give volumetric presence in VR.
+// Only sub-0 emitters (16) used for performance — no seRenderWorld overhead.
 //
-// World: subtle grid floor, fog density 0.06, dark ambient.
-// Camera: listener inside the field, slow orbit, FOV 0.6 (VR: head pose from OpenXR).
-// Negative space: only active emitters render, gated aggressively.
+// Audio-to-visual mapping:
+//   b0-b7       -> 8 band positions with Chladni wave patterns
+//   beat        -> wave compression + pulse
+//   kick        -> central flash
+//   transient   -> turbulence noise
+//   envelope    -> field density
+//   stereoBal   -> camera orbit
+//   stereoWid   -> field spread
+//   stereoDiff  -> vertical offset
+//   phaseCoh    -> wave coherence
+//   section     -> camera repositioning
+//   phraseBeat  -> slow breathing
+//   speechMode  -> vocal band boost
+//   calmMode    -> reduced turbulence
+//   brightness  -> field intensity
+//   glow        -> ambient field glow
+//   colorPulse  -> hue shift
+//   beatAnt     -> anticipatory swell
 //
-// DSP additive: LUFS→density, crest→sharpness, THD→turbulence, phase→L/R coherence.
-// HDR output to Layer 0. No local postfx. Pipeline owns bloom/tonemap.
+// DSP: LUFS->density, crest->sharpness, THD->turbulence, phase->coherence.
+// HDR output to Layer 0. No local postfx. 16-emitter Chladni loop.
 
 #include "include/spatial_encoder.hlsl"
 #include "include/layers.hlsl"
@@ -55,8 +65,8 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
     if (VR_ACTIVE) {
         cam = seCameraVR();
     } else {
-        float FOV = 0.6;
-        float camAng = a.section * 0.2 + a.stereoBal * 0.15;
+        float FOV = 0.65;
+        float camAng = a.section * 0.2 + a.stereoBal * 0.15 + Time * 0.03 * a.motSpeed;
         float3 camPos = float3(sin(camAng) * 2.5, 1.0 + a.stereoDiff * 0.08, cos(camAng) * 3.0);
         cam = seCamera(camPos, float3(0, 0, 0), FOV);
     }
@@ -68,9 +78,9 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
     params.depthScale = 5.0;
     params.stereoWid = a.stereoWid;
     params.stereoBal = a.stereoBal;
-    params.motionSpeed = 0.8;
+    params.motionSpeed = 0.8 * (1.0 - a.calmMode * 0.3);
     params.crossOver = 0.35;
-    params.jitterAmt = 1.2;
+    params.jitterAmt = 0.8 + thd * 0.3;
 
     // ── Compute all 48 emitters from brain data ──
     SeEmitter emit[SE_NUM_OBJ];
@@ -93,18 +103,11 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
     // Apply fog to all emitters (precomputes depthFog)
     seApplyWorldFog(emit, world);
 
-    // ── Render world + emitters + links + listener ──
-    float3 col;
-    if (VR_ACTIVE) {
-        float3 headPos = VRHeadPos.xyz;
-        col = seRenderWorldVR(p, emit, cam, world, headPos,
-                              a, beatPulse, kickSurge, phaseCorr, phaseCoh, silence);
-    } else {
-        col = seRenderWorld(p, emit, cam, world,
-                           lufs, crest, beatPulse, a.beatPhase,
-                           kickSurge, transientAmt, phaseCorr, phaseCoh,
-                           a, beatPulse, silence);
-    }
+    // ── World environment only (no emitter glow — Chladni field IS the visual) ──
+    float3 col = seWorldEnvironment(p, cam, world, a, kickSurge, silence);
+    col += starfield(uv, a) * 0.005;
+    float nebula = fbm2_4(p * 0.7 + Time * 0.002 * a.motSpeed);
+    col += a.brainCol * nebula * 0.004 * a.ambient * a.ambActive * silence;
 
     // ── Chladni standing-wave interference field ──
     // Sum wave patterns from active emitters — this is the signature visual
@@ -115,9 +118,12 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
     float3 fieldCol = float3(0, 0, 0);
     float weightSum = 0.0;
 
-    [loop] for (int j = 0; j < SE_NUM_OBJ; j++) {
-        if (emit[j].active < 0.01) continue;
-        if (emit[j].depth < 0.1) continue;
+    // Only sub-0 emitters (16 instead of 48) for performance
+    [loop] for (int bi = 0; bi < SE_N_BANDS; bi++) {
+        for (int side = 0; side < 2; side++) {
+            int j = bi * SE_N_SUB * 2 + side;
+            if (emit[j].active < 0.01) continue;
+            if (emit[j].depth < 0.1) continue;
 
         float2 diff = p - emit[j].screenPos;
         float scrDist2 = dot(diff, diff);
@@ -134,8 +140,16 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
         float waveFreq = lerp(3.0, 12.0, bt);
         float depthPhase = emit[j].depth * 1.5;
 
-        float chlad = chladni(scrDist, waveFreq, waveTime + depthPhase + float(j) * 0.1, mode1, mode2);
+        float chlad = chladni(scrDist, waveFreq, waveTime + depthPhase + float(bi) * 0.1, mode1, mode2);
         float amp = emit[j].intensity;
+        amp += a.beatAnt * 0.15;
+        amp += a.glow * 0.03;
+        amp *= (0.7 + a.brightness * 0.3);
+        amp *= (1.0 - a.calmMode * 0.3);
+        // Speech mode boosts vocal bands
+        float vocalWeight = smoothstep(2.5, 3.5, float(bi)) * (1.0 - smoothstep(5.0, 6.0, float(bi)));
+        amp += a.speechMode * vocalWeight * 0.2;
+
         float depthFog = emit[j].depthFog;
         float falloff = exp(-scrDist2 / (inflR2 * 0.3));
 
@@ -144,6 +158,7 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
         fieldVal += wave;
         fieldCol += emit[j].color * abs(wave);
         weightSum += abs(wave);
+        }
     }
 
     if (weightSum > 0.001) fieldCol /= weightSum;
@@ -163,20 +178,25 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
     emission *= (1.0 + beatPulse * 0.08);
     col += emission * silence;
 
-    // ── Mode-specific overlays ──
-    col += a.brainCol3 * kickSurge * 0.01 * exp(-r * r * 5.0) * silence;
-    col += float3(1.0, 0.8, 0.5) * transientAmt * 0.006 * silence;
-    col += a.brainCol3 * a.colorPulse * 0.005 * silence;
-    col += a.brainCol2 * a.energy * 0.004 * silence;
-    col += a.brainCol * a.beatAnt * 0.003 * exp(-r * 2.0) * silence;
+    // ── Kick flash ──
+    col += float3(0.8, 0.4, 0.1) * kickSurge * 0.04 * exp(-r * r * 5.0) * silence;
 
-    col *= (0.3 + a.gated * 0.7);
-    col += standardOverlays(p, r, a) * 0.006;
+    // ── Phrase breathing ──
+    float phraseMod = sin(a.phraseBeat * PI * 2.0) * 0.03 + 0.03;
+    col += a.brainCol * phraseMod * silence;
 
-        // ── Active-emitter normalization — busy music doesn't stack brighter ──
+    // ── Listener focal point ──
+    col += seListener(p, cam, a, beatPulse, kickSurge, silence);
+
+    col *= (0.5 + a.gated * 0.5);
+    col += standardOverlays(p, r, a) * 0.01;
+
+    // ── Active-emitter normalization ──
     col *= sqrt(16.0 / seActiveCount(emit));
-    // ── Soft tone mapping (Reinhard) — no hard clamp, preserves color ──
-    col = softReinhard(col);
+
+    // ── HDR limiter ──
+    float maxC = max(col.r, max(col.g, col.b));
+    if (maxC > 1.2) col *= 1.2 / maxC;
 
     col *= silence;
     return float4(col, 1.0);

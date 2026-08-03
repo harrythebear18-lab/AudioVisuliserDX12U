@@ -1,78 +1,108 @@
 // RS by Resonance — RapidSpectrum Visualizer
-// Mode 36: Gravitational Wavefield — Cosmic Web
+// HUD Mode 37: Spectral Ribbon — a flowing 3D river of light
 // VR Layer mode. Uses spatial_encoder.hlsl with SE_PROFILE_SPHERICAL.
 //
-// 48 emitters distributed on a golden-ratio sphere via SPHERICAL profile.
-// Filaments connect nearby emitters — a cosmic web of gravitational links.
-// Each emitter is a gravitational well; filaments show spacetime curvature.
-// Beat = omnidirectional gravitational wave event. Kick = spacetime tear.
+// Concept: A continuous ribbon of light flows through 3D space in a serpentine
+// path. 8 frequency band segments along its length, each glowing with its
+// band energy. The ribbon has width and twists as it flows. Beat sends pulses
+// traveling along it. Kick creates a sharp flex. Transient adds turbulence.
+// Camera flies alongside the ribbon. Depth fog gives real 3D perspective.
 //
-// World: grid floor for spatial grounding, fog density 0.04, dark ambient.
-// Camera: outside looking in at the web, FOV 0.5 (VR: head pose from OpenXR).
-// Filaments: distance-to-segment rendering with depth fog, culled by proximity.
+// Audio-to-visual mapping:
+//   b0-b7       -> 8 segments along ribbon length
+//   beat        -> pulse traveling along ribbon
+//   kick        -> sharp flex/displacement
+//   transient   -> turbulence in ribbon path
+//   envelope    -> overall ribbon brightness
+//   stereoBal   -> ribbon shifts L/R
+//   stereoWid   -> ribbon amplitude
+//   stereoDiff  -> ribbon asymmetry
+//   phaseCoh    -> ribbon coherence (smooth vs chaotic)
+//   section     -> camera position along ribbon
+//   phraseBeat  -> slow ribbon breathing
+//   speechMode  -> vocal segment brightening
+//   calmMode    -> reduced turbulence
+//   brightness  -> ribbon glow
+//   glow        -> ambient glow
+//   colorPulse  -> hue shift
+//   beatAnt     -> anticipatory swell
 //
-// DSP additive: LUFS→well depth, crest→filament sharpness, THD→jitter,
-// phase→L/R filament coherence.
-// HDR output to Layer 0. No local postfx. Pipeline owns bloom/tonemap.
+// DSP: LUFS->brightness, crest->edge sharpness, THD->turbulence,
+//      phase->smoothness. HDR output to Layer 0. No local postfx.
+// Performance: 48 point projections along ribbon = 48 per pixel.
 
 #include "include/spatial_encoder.hlsl"
 #include "include/layers.hlsl"
 
 #define PI 3.14159265
+#define RIBBON_N 48
 
-// ── Distance from point to line segment in 2D ──
-float distToSeg2D(float2 p, float2 a, float2 b, out float2 closest)
+// ── 3D ribbon point — parametric position along the flowing ribbon ──
+float3 ribbonPoint(float t, AudioData a, float kickSurge, float transientAmt,
+                   float thd, float phaseCoh, float phraseBeat)
 {
-    float2 ab = b - a;
-    float lenSq = dot(ab, ab);
-    if (lenSq < 0.0001) { closest = a; return length(p - a); }
-    float t = clamp(dot(p - a, ab) / lenSq, 0.0, 1.0);
-    closest = a + ab * t;
-    return length(p - closest);
+    // Serpentine path — flows forward in Z, waves in X and Y
+    float z = (t - 0.5) * 12.0;  // -6 to +6
+
+    // X displacement — stereo width + band-driven waves
+    float xWave = sin(t * PI * 3.0 + Time * 0.5 * a.motSpeed) * 2.5;
+    xWave *= (0.6 + a.stereoWid * 0.4);
+    xWave += a.stereoBal * 1.5;
+
+    // Y displacement — vertical undulation
+    float yWave = sin(t * PI * 2.0 + Time * 0.3 * a.motSpeed + 1.5) * 1.5;
+    yWave += cos(t * PI * 5.0 + Time * 0.4) * 0.3 * (1.0 - a.calmMode);
+
+    // Kick flex — sharp displacement near t=0.3
+    float kickFlex = exp(-pow(t - 0.3, 2.0) * 20.0) * kickSurge * 2.0;
+    yWave += kickFlex;
+
+    // Transient turbulence
+    float turb = sin(t * 30.0 + Time * 10.0) * transientAmt * 0.5;
+    turb += sin(t * 50.0 + Time * 15.0) * thd * 0.3;
+    turb *= (1.0 - a.calmMode * 0.5);
+    xWave += turb;
+
+    // Phase coherence — low coherence adds chaos
+    float chaos = sin(t * 20.0 + Time * 3.0) * (1.0 - phaseCoh) * 0.5;
+    xWave += chaos;
+
+    // Phrase breathing — slow amplitude modulation
+    float breathe = 1.0 + sin(phraseBeat * PI * 2.0) * 0.15;
+    xWave *= breathe;
+    yWave *= breathe;
+
+    return float3(xWave, yWave, z);
 }
 
-// ── Filament rendering — connect two emitters with a glowing filament ──
-// Uses distance-to-segment with depth fog from both endpoints
-float3 renderFilament(float2 p, SeEmitter a, SeEmitter b,
-                      float phaseCorr, float phaseCoh, float silence)
+// ── Band lookup for ribbon segment ──
+float bandAt(float t, float b0, float b1, float b2, float b3, float b4, float b5, float b6, float b7)
 {
-    if (a.active < 0.05 || b.active < 0.05) return float3(0, 0, 0);
-    if (a.depth < 0.1 || b.depth < 0.1) return float3(0, 0, 0);
-    if (a.intensity < 0.06 || b.intensity < 0.06) return float3(0, 0, 0);
+    float s = saturate(t) * 7.0;
+    if (s < 1.0) return lerp(b0, b1, frac(s));
+    if (s < 2.0) return lerp(b1, b2, frac(s));
+    if (s < 3.0) return lerp(b2, b3, frac(s));
+    if (s < 4.0) return lerp(b3, b4, frac(s));
+    if (s < 5.0) return lerp(b4, b5, frac(s));
+    if (s < 6.0) return lerp(b5, b6, frac(s));
+    return lerp(b6, b7, frac(s));
+}
 
-    // Screen-space distance to segment
-    float2 closest;
-    float segDist = distToSeg2D(p, a.screenPos, b.screenPos, closest);
-    float segDist2 = segDist * segDist;
-    if (segDist2 > 0.015) return float3(0, 0, 0);
-
-    // Average depth fog — both endpoints contribute
-    float avgDepthFog = (a.depthFog + b.depthFog) * 0.5;
-
-    // Filament strength — based on proximity in world space + phase correlation
-    float worldDist = length(a.worldPos - b.worldPos);
-    float proximity = exp(-worldDist * 0.8);
-    float linkStr = proximity * a.intensity * b.intensity * (0.3 + phaseCorr * 0.4);
-    linkStr *= avgDepthFog;
-
-    // Filament color — blend both emitter colors
-    float3 linkCol = lerp(a.color, b.color, 0.5);
-
-    // Thin glowing line
-    float lineWidth = 0.0015 / max(avgDepthFog, 0.1);
-    float lineIntensity = exp(-segDist2 / (lineWidth * lineWidth * 3.0));
-
-    float3 col = linkCol * lineIntensity * linkStr * 0.15 * silence;
-
-    // Phase coherence bright spot at midpoint
-    if (phaseCoh > 0.4) {
-        float2 midPt = (a.screenPos + b.screenPos) * 0.5;
-        float midDist = length(p - midPt);
-        col += float3(0.85, 0.9, 1.0) * exp(-midDist * midDist * 500.0) *
-               phaseCoh * a.intensity * b.intensity * 0.04 * avgDepthFog * silence;
-    }
-
-    return col;
+float3 bandColorAt(float t, AudioData a)
+{
+    float s = saturate(t) * 7.0;
+    float frac_s = frac(s);
+    float3 c0, c1;
+    if (s < 1.0) { c0 = a.brainCol; c1 = lerp(a.brainCol, a.brainCol2, 0.071); }
+    else if (s < 2.0) { c0 = lerp(a.brainCol, a.brainCol2, 0.071); c1 = lerp(a.brainCol, a.brainCol2, 0.143); }
+    else if (s < 3.0) { c0 = lerp(a.brainCol, a.brainCol2, 0.143); c1 = lerp(a.brainCol, a.brainCol2, 0.214); }
+    else if (s < 4.0) { c0 = lerp(a.brainCol, a.brainCol2, 0.214); c1 = lerp(a.brainCol, a.brainCol2, 0.286); }
+    else if (s < 5.0) { c0 = lerp(a.brainCol, a.brainCol2, 0.286); c1 = lerp(a.brainCol, a.brainCol2, 0.357); }
+    else if (s < 6.0) { c0 = lerp(a.brainCol, a.brainCol2, 0.357); c1 = lerp(a.brainCol, a.brainCol2, 0.429); }
+    else { c0 = lerp(a.brainCol, a.brainCol2, 0.429); c1 = lerp(a.brainCol, a.brainCol2, 0.5); }
+    c0 = lerp(c0, a.brainCol3, s / 7.0 * 0.2);
+    c1 = lerp(c1, a.brainCol3, (s + 1.0) / 7.0 * 0.2);
+    return lerp(c0, c1, frac_s);
 }
 
 float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target
@@ -87,157 +117,175 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target
     float crest = crestFactorNormalized();
     float thd = thdNormalized();
     float phaseCoh = phaseCoherence();
-    float phaseCorr = phaseCoherence();
 
     // ── Audio dynamics ──
-    float bands[8] = { a.b0, a.b1, a.b2, a.b3, a.b4, a.b5, a.b6, a.b7 };
     float beatPulse = a.beat * a.tempoConf;
     float kickSurge = a.kick * a.kickConf * exp(-a.beatPhase * 3.0);
     float transientAmt = a.transient;
     float envelope = a.envelope;
 
-    // ── Camera — VR head pose or desktop orbit outside the web ──
+    // ── Camera — flying alongside the ribbon ──
     SeCamera cam;
     if (VR_ACTIVE) {
         cam = seCameraVR();
     } else {
-        float FOV = 0.5;
-        float camAng = a.section * 0.08 + a.stereoBal * 0.12;
-        float camDist = 6.0;
-        float camHeight = 2.0 + a.stereoDiff * 0.1;
-        float3 camPos = float3(sin(camAng) * camDist, camHeight, cos(camAng) * camDist);
-        cam = seCamera(camPos, float3(0, 0, 0), FOV);
+        float FOV = 0.7;
+        // Camera offset to the side, slowly drifting
+        float camSide = 4.0 + sin(Time * 0.04) * 0.5;
+        float camHeight = 1.0 + sin(Time * 0.03) * 0.5 + a.stereoDiff * 0.3;
+        float3 camPos = float3(camSide, camHeight, 0.0);
+        // Look at center of ribbon, slight drift
+        float3 camTarget = float3(a.stereoBal * 0.5, 0.0, sin(Time * 0.02) * 1.0);
+        cam = seCamera(camPos, camTarget, FOV);
     }
 
-    // ── Spatial encoder: SPHERICAL profile ──
+    // ── Spatial encoder for normalization ──
     SeParams params = seParams(SE_PROFILE_SPHERICAL);
-    params.widthScale = 3.0;
-    params.heightScale = 3.0;
-    params.depthScale = 3.0;
+    params.widthScale = 2.0;
+    params.heightScale = 2.0;
+    params.depthScale = 2.0;
     params.stereoWid = a.stereoWid;
     params.stereoBal = a.stereoBal;
-    params.motionSpeed = 0.5;
-    params.crossOver = 0.3;
-    params.jitterAmt = 0.8;
+    params.motionSpeed = 1.0;
+    params.jitterAmt = 0.3;
 
-    // ── Compute all 48 emitters from brain data ──
+    float bandsArr[8] = { a.b0, a.b1, a.b2, a.b3, a.b4, a.b5, a.b6, a.b7 };
     SeEmitter emit[SE_NUM_OBJ];
-    seComputeEmitters(emit, bands, a, cam, params,
+    seComputeEmitters(emit, bandsArr, a, cam, params,
                       lufs, crest, thd, phaseCoh,
                       beatPulse, kickSurge, transientAmt, envelope);
 
-    // ── World environment — grid floor for spatial grounding, moderate fog ──
-    SeWorld world = seWorld(0.04,                          // fog density
-                            float3(0.008, 0.006, 0.015),   // fog color (deep space)
-                            -2.0,                          // floor Y (below the web)
-                            0.0,                           // no ceiling
-                            0.0);                          // no back wall
-    world.gridScale = 3.0;
-    world.gridIntensity = 0.02;    // subtle
-    world.ambientLevel = 0.002;    // very dark
-    world.ambientColor = float3(0.05, 0.04, 0.1);
-    world.flags = 1;               // floor only
+    // ── Background ──
+    float3 col = float3(0.003, 0.002, 0.005) * silence;
+    col += starfield(uv, a) * 0.006;
+    float nebula = fbm2_4(p * 0.6 + Time * 0.002 * a.motSpeed);
+    col += a.brainCol * nebula * 0.005 * a.ambient * a.ambActive * silence;
 
-    // Apply fog to all emitters
-    seApplyWorldFog(emit, world);
+    // ── PRIMARY: Ribbon rendering ──
+    // Project all ribbon points to screen space
+    float3 ribbonPos[RIBBON_N];
+    float2 ribbonScreen[RIBBON_N];
+    float ribbonDepth[RIBBON_N];
 
-    // ── Render world environment ──
-    float3 col = seWorldEnvironment(p, cam, world, a, kickSurge, silence);
-
-    // ── Background — deep spacetime void ──
-    col += float3(0.002, 0.001, 0.004) * silence;
-    col += starfield(uv, a) * 0.012;
-    float nebula = fbm2_4(p * 0.8 + Time * 0.003 * a.motSpeed);
-    col += a.brainCol * nebula * 0.006 * a.ambient * a.ambActive * silence;
-
-    // ── Filament rendering — cosmic web connections ──
-    // Connect emitters that are near each other in 3D space
-    // L↔R links per band (standard spatial encoder links)
-    [loop] for (int lb = 0; lb < SE_N_BANDS; lb++) {
-        col += seLinkLR(p, emit, lb, phaseCorr, phaseCoh, silence);
-    }
-
-    // Filament connections between adjacent sub-frequencies within same band+side
-    // This creates the web-like structure
-    [loop] for (int bi = 0; bi < SE_N_BANDS; bi++) {
-        [unroll] for (int si = 0; si < SE_N_SUB - 1; si++) {
-            for (int side = 0; side < 2; side++) {
-                int idx0 = bi * SE_N_SUB * 2 + si * 2 + side;
-                int idx1 = bi * SE_N_SUB * 2 + (si + 1) * 2 + side;
-                col += renderFilament(p, emit[idx0], emit[idx1],
-                                      phaseCorr, phaseCoh, silence);
-            }
+    [unroll] for (int i = 0; i < RIBBON_N; i++) {
+        float t = float(i) / float(RIBBON_N - 1);
+        ribbonPos[i] = ribbonPoint(t, a, kickSurge, transientAmt, thd, phaseCoh, a.phraseBeat);
+        float3 toPt = ribbonPos[i] - cam.pos;
+        float depth = dot(toPt, cam.fwd);
+        ribbonDepth[i] = depth;
+        if (depth > 0.1) {
+            float sx = dot(toPt, cam.right) / depth * cam.fov;
+            float sy = dot(toPt, cam.up) / depth * cam.fov;
+            ribbonScreen[i] = float2(sx, sy);
+        } else {
+            ribbonScreen[i] = float2(999.0, 999.0);
+            ribbonDepth[i] = 0.01;
         }
     }
 
-    // Filament connections between adjacent bands (same sub+side)
-    [loop] for (int bi = 0; bi < SE_N_BANDS - 1; bi++) {
-        [unroll] for (int si = 0; si < SE_N_SUB; si++) {
-            for (int side = 0; side < 2; side++) {
-                int idx0 = bi * SE_N_SUB * 2 + si * 2 + side;
-                int idx1 = (bi + 1) * SE_N_SUB * 2 + si * 2 + side;
-                col += renderFilament(p, emit[idx0], emit[idx1],
-                                      phaseCorr, phaseCoh, silence);
-            }
-        }
-    }
+    // Render ribbon as connected segments with width
+    [loop] for (int seg = 0; seg < RIBBON_N - 1; seg++) {
+        float t0 = float(seg) / float(RIBBON_N - 1);
+        float t1 = float(seg + 1) / float(RIBBON_N - 1);
 
-    // Cross-side filaments for dominant bands (creates 3D web structure)
-    [loop] for (int bi = 0; bi < SE_N_BANDS; bi++) {
-        [unroll] for (int si = 0; si < SE_N_SUB; si++) {
-            int li = bi * SE_N_SUB * 2 + si * 2;
-            int ri = bi * SE_N_SUB * 2 + si * 2 + 1;
-            // Only render cross-side filaments when both are active and close
-            float worldDist = length(emit[li].worldPos - emit[ri].worldPos);
-            if (worldDist < 3.0) {
-                col += renderFilament(p, emit[li], emit[ri],
-                                      phaseCorr, phaseCoh, silence);
-            }
-        }
-    }
+        if (ribbonDepth[seg] < 0.1 || ribbonDepth[seg + 1] < 0.1) continue;
 
-    // ── Emitter glow — gravitational wells ──
-    if (VR_ACTIVE) {
-        float3 headPos = VRHeadPos.xyz;
-        [loop] for (int ri2 = 0; ri2 < SE_NUM_OBJ; ri2++) {
-            if (emit[ri2].active < 0.01) continue;
-            if (emit[ri2].depth < 0.1) continue;
-            col += seEmitGlowVR(p, emit[ri2], world, headPos, silence);
+        float2 s0 = ribbonScreen[seg];
+        float2 s1 = ribbonScreen[seg + 1];
+        float avgDepth = (ribbonDepth[seg] + ribbonDepth[seg + 1]) * 0.5;
+        float depthFade = exp(-avgDepth * 0.06);
+
+        // Distance from pixel to ribbon segment
+        float2 ab = s1 - s0;
+        float lenSq = dot(ab, ab);
+        if (lenSq < 0.0001) continue;
+        float tt = clamp(dot(p - s0, ab) / lenSq, 0.0, 1.0);
+        float2 closest = s0 + ab * tt;
+        float dist = length(p - closest);
+        float dist2 = dist * dist;
+
+        // Ribbon width — scales with band energy and depth
+        float bandE0 = bandAt(t0, a.b0, a.b1, a.b2, a.b3, a.b4, a.b5, a.b6, a.b7);
+        float bandE1 = bandAt(t1, a.b0, a.b1, a.b2, a.b3, a.b4, a.b5, a.b6, a.b7);
+        float bandE = lerp(bandE0, bandE1, tt);
+        float ribbonW = 0.015 + bandE * 0.03;
+        ribbonW /= max(avgDepth * 0.15, 0.1);
+
+        if (dist2 > ribbonW * ribbonW * 4.0) continue;
+
+        // Intensity
+        float intensity = bandE * (1.0 + lufs * 0.3);
+        intensity += envelope * 0.1;
+        intensity += a.glow * 0.05;
+        intensity += a.beatAnt * 0.2;
+        intensity *= (0.7 + a.brightness * 0.3);
+        intensity *= (1.0 - a.calmMode * 0.3);
+
+        // Vocal band boost
+        float vocalWeight = smoothstep(0.3, 0.4, t0) * (1.0 - smoothstep(0.6, 0.7, t0));
+        intensity += a.speechMode * vocalWeight * 0.25;
+
+        // Color
+        float3 ribCol = bandColorAt(lerp(t0, t1, tt), a);
+        ribCol = lerp(ribCol, ribCol.bgr, a.colorPulse * 0.02);
+        ribCol = lerp(ribCol, a.brainCol2, a.speechMode * vocalWeight * 0.3);
+
+        // Glow profile — core + halo
+        float core = exp(-dist2 / (ribbonW * ribbonW * 0.3));
+        float halo = exp(-dist2 / (ribbonW * ribbonW * 3.0));
+
+        float3 segCol = ribCol * (core * 0.4 + halo * 0.15) * intensity * depthFade * silence;
+
+        // Beat pulse traveling along ribbon
+        float beatPos = frac(a.beatPhase);
+        float beatDist = abs(tt - beatPos);
+        float beatWave = exp(-beatDist * beatDist * 30.0) * beatPulse;
+        segCol += ribCol * core * beatWave * intensity * 0.3 * depthFade * silence;
+
+        // Kick flash on bass segment
+        if (t0 < 0.2) {
+            segCol += float3(0.8, 0.4, 0.1) * kickSurge * core * 0.15 * depthFade * silence;
         }
-    } else {
-        [loop] for (int ri2 = SE_NUM_OBJ - 1; ri2 >= 0; ri2--) {
-            if (emit[ri2].active < 0.01) continue;
-            if (emit[ri2].depth < 0.1) continue;
-            col += seEmitGlowDepth(p, emit[ri2], world, lufs, crest, beatPulse,
-                                   a.beatPhase, kickSurge, transientAmt, silence);
-        }
+
+        // Crest sharpens core
+        segCol += ribCol * core * crest * intensity * 0.08 * depthFade * silence;
+
+        // Phrase breathing
+        float phraseMod = sin(a.phraseBeat * PI * 2.0 + t0 * PI * 3.0) * 0.08 + 0.08;
+        segCol += ribCol * halo * phraseMod * intensity * 0.05 * depthFade * silence;
+
+        col += segCol;
     }
 
     // ── Listener focal point ──
     col += seListener(p, cam, a, beatPulse, kickSurge, silence);
 
-    // ── Beat — gravitational wave pulse through web ──
-    float ringDist = abs(r - a.beatPhase * 0.7);
-    col += a.brainCol * exp(-ringDist * ringDist * 40.0) * beatPulse * 0.015 * silence;
+    // ── Beat — radial pulse ──
+    float ringDist = abs(r - a.beatPhase * 0.5);
+    col += a.brainCol * exp(-ringDist * ringDist * 50.0) * beatPulse * 0.03 * silence;
 
-    // ── Kick — spacetime tear ──
-    col += float3(1.0, 0.4, 0.1) * kickSurge * 0.03 * exp(-r * r * 5.0) * silence;
+    // ── Kick — central flash ──
+    col += float3(0.8, 0.4, 0.1) * kickSurge * 0.06 * exp(-r * r * 5.0) * silence;
 
-    // ── Transient — quantum fluctuation ──
-    col += float3(0.8, 0.9, 1.0) * transientAmt * 0.01 * silence;
+    // ── Transient shimmer ──
+    if (transientAmt > 0.05) {
+        col += a.brainCol3 * transientAmt * fbm2_4(p * 12.0 + Time * 5.0) * 0.015 * silence;
+    }
 
-    // ── Mode-specific overlays ──
-    col += a.brainCol3 * a.colorPulse * 0.01 * silence;
-    col += a.brainCol2 * a.energy * 0.008 * silence;
-    col += a.brainCol * a.punch * 0.008 * silence;
-    col += a.brainCol * a.beatAnt * 0.006 * exp(-r * 2.0) * silence;
+    // ── Dynamic range ──
+    col *= (0.5 + a.gated * 0.5);
 
-    col += standardOverlays(p, r, a) * 0.015 * silence;
+    // ── Standard overlays ──
+    col += standardOverlays(p, r, a) * 0.015;
 
-    // ── Active-emitter normalization — busy music doesn't stack brighter ──
-    col *= sqrt(16.0 / seActiveCount(emit));
-    // ── Soft tone mapping (Reinhard) — no hard clamp, preserves color ──
-    col = softReinhard(col);
+    // ── Active-emitter normalization ──
+    col *= sqrt(24.0 / seActiveCount(emit));
+
+    // ── HDR limiter ──
+    float maxC = max(col.r, max(col.g, col.b));
+    if (maxC > 1.2) col *= 1.2 / maxC;
+
+    col *= silence;
 
     return float4(col, 1.0);
 }
