@@ -1,6 +1,7 @@
 using System;
 using System.Numerics;
 using System.Runtime.InteropServices;
+using System.Reflection;
 using Vortice.Direct3D;
 using Vortice.Direct3D12;
 using Vortice.Direct3D12.Debug;
@@ -219,6 +220,25 @@ public class DX12Renderer : IRenderer
     private bool _hudVisible = true;
     private PipelineValidator? _validator;
     private byte[]? _vsBytecode;
+    private static readonly Assembly _asm = Assembly.GetExecutingAssembly();
+
+    // Load compiled shader bytecode from embedded resources (no .hlsl files needed at runtime)
+    private static byte[]? LoadEmbeddedShader(string resourceName)
+    {
+        var names = _asm.GetManifestResourceNames();
+        string? match = names.FirstOrDefault(n => n.EndsWith($"{resourceName}.dxbc", StringComparison.OrdinalIgnoreCase));
+        if (match == null)
+        {
+            DebugLogger.Warn($"[DX12Renderer] Embedded shader not found: {resourceName}.dxbc");
+            return null;
+        }
+        using var stream = _asm.GetManifestResourceStream(match);
+        if (stream == null) return null;
+        byte[] bytecode = new byte[stream.Length];
+        stream.ReadExactly(bytecode);
+        DebugLogger.Info($"[DX12U] Loaded embedded shader: {resourceName} ({bytecode.Length} bytes)");
+        return bytecode;
+    }
 
     // Bloom is handled by DX11 compositor — DX12 renders high-quality visualizer into shared texture
     // DX12 Ultimate uses DXC SM6.6+ compilation for inline raytracing and advanced shader features
@@ -1011,14 +1031,15 @@ public class DX12Renderer : IRenderer
         {
             if (Directory.Exists(p)) { shaderDir = p; break; }
         }
-        if (string.IsNullOrEmpty(shaderDir))
+        if (!string.IsNullOrEmpty(shaderDir))
         {
-            DebugLogger.Error("[DX12Renderer] Shader directory not found!");
-            return;
+            DebugLogger.Info($"[DX12Renderer] Shader dir: {shaderDir}");
+            _shaderDir = shaderDir;
         }
-
-        DebugLogger.Info($"[DX12Renderer] Shader dir: {shaderDir}");
-        _shaderDir = shaderDir;
+        else
+        {
+            DebugLogger.Info("[DX12Renderer] No shader dir found — using embedded shaders only");
+        }
 
         string[] modes = {
             "quantum_bars",       // 0. Quantum Bars — 3D spectrum with quantum clouds
@@ -1080,18 +1101,22 @@ public class DX12Renderer : IRenderer
 
         foreach (var mode in modes)
         {
-            string hlslFile = Path.Combine(shaderDir, $"dx_{mode}.hlsl");
-            if (!File.Exists(hlslFile)) continue;
-
             try
             {
-                string source = File.ReadAllText(hlslFile);
-                source = PreprocessIncludes(source);
-                string dxcTarget = "ps_6_6";
-                string fxcTarget = "ps_5_0";
-                DebugLogger.Info($"[DX12] Compiling {mode} ({source.Length} bytes)...");
+                // Try embedded compiled bytecode first (production mode — no .hlsl files needed)
+                byte[]? psBytecode = LoadEmbeddedShader($"dx_{mode}");
 
-                byte[] psBytecode = CompileShader(source, "main", $"dx_{mode}.hlsl", dxcTarget, fxcTarget);
+                if (psBytecode == null)
+                {
+                    // Fallback: compile from .hlsl source at runtime (dev mode)
+                    string hlslFile = Path.Combine(shaderDir, $"dx_{mode}.hlsl");
+                    if (!File.Exists(hlslFile)) continue;
+
+                    string source = File.ReadAllText(hlslFile);
+                    source = PreprocessIncludes(source);
+                    DebugLogger.Info($"[DX12] Compiling {mode} ({source.Length} bytes)...");
+                    psBytecode = CompileShader(source, "main", $"dx_{mode}.hlsl", "ps_6_6", "ps_5_0");
+                }
 
                 DebugLogger.Info($"[DX12] PS bytecode for {mode}: {psBytecode.Length} bytes");
 
@@ -1322,26 +1347,42 @@ public class DX12Renderer : IRenderer
         try
         {
             // Bloom extract
-            string extractSource = PreprocessIncludes(File.ReadAllText(Path.Combine(shaderDir, "dx_bloom_extract.hlsl")));
-            var extractBytecode = CompileShader(extractSource, "main", "dx_bloom_extract.hlsl", "ps_6_6", "ps_5_0");
+            byte[]? extractBytecode = LoadEmbeddedShader("dx_bloom_extract");
+            if (extractBytecode == null)
+            {
+                string extractSource = PreprocessIncludes(File.ReadAllText(Path.Combine(shaderDir, "dx_bloom_extract.hlsl")));
+                extractBytecode = CompileShader(extractSource, "main", "dx_bloom_extract.hlsl", "ps_6_6", "ps_5_0");
+            }
             _bloomExtractPSO = _device.CreateGraphicsPipelineState(CreatePSODesc(vsBytecode, extractBytecode, Format.R16G16B16A16_Float));
             DebugLogger.Info("[DX12] Bloom extract shader loaded");
 
             // Bloom blur H
-            string blurHSource = PreprocessIncludes(File.ReadAllText(Path.Combine(shaderDir, "dx_bloom_blur_h.hlsl")));
-            var blurHBytecode = CompileShader(blurHSource, "main", "dx_bloom_blur_h.hlsl", "ps_6_6", "ps_5_0");
+            byte[]? blurHBytecode = LoadEmbeddedShader("dx_bloom_blur_h");
+            if (blurHBytecode == null)
+            {
+                string blurHSource = PreprocessIncludes(File.ReadAllText(Path.Combine(shaderDir, "dx_bloom_blur_h.hlsl")));
+                blurHBytecode = CompileShader(blurHSource, "main", "dx_bloom_blur_h.hlsl", "ps_6_6", "ps_5_0");
+            }
             _bloomBlurHPSO = _device.CreateGraphicsPipelineState(CreatePSODesc(vsBytecode, blurHBytecode, Format.R16G16B16A16_Float));
             DebugLogger.Info("[DX12] Bloom blur H shader loaded");
 
             // Bloom blur V
-            string blurVSource = PreprocessIncludes(File.ReadAllText(Path.Combine(shaderDir, "dx_bloom_blur_v.hlsl")));
-            var blurVBytecode = CompileShader(blurVSource, "main", "dx_bloom_blur_v.hlsl", "ps_6_6", "ps_5_0");
+            byte[]? blurVBytecode = LoadEmbeddedShader("dx_bloom_blur_v");
+            if (blurVBytecode == null)
+            {
+                string blurVSource = PreprocessIncludes(File.ReadAllText(Path.Combine(shaderDir, "dx_bloom_blur_v.hlsl")));
+                blurVBytecode = CompileShader(blurVSource, "main", "dx_bloom_blur_v.hlsl", "ps_6_6", "ps_5_0");
+            }
             _bloomBlurVPSO = _device.CreateGraphicsPipelineState(CreatePSODesc(vsBytecode, blurVBytecode, Format.R16G16B16A16_Float));
             DebugLogger.Info("[DX12] Bloom blur V shader loaded");
 
             // Bloom combine
-            string combineSource = PreprocessIncludes(File.ReadAllText(Path.Combine(shaderDir, "dx_bloom_combine.hlsl")));
-            var combineBytecode = CompileShader(combineSource, "main", "dx_bloom_combine.hlsl", "ps_6_6", "ps_5_0");
+            byte[]? combineBytecode = LoadEmbeddedShader("dx_bloom_combine");
+            if (combineBytecode == null)
+            {
+                string combineSource = PreprocessIncludes(File.ReadAllText(Path.Combine(shaderDir, "dx_bloom_combine.hlsl")));
+                combineBytecode = CompileShader(combineSource, "main", "dx_bloom_combine.hlsl", "ps_6_6", "ps_5_0");
+            }
             _bloomCombinePSO = _device.CreateGraphicsPipelineState(CreatePSODesc(vsBytecode, combineBytecode, Format.R16G16B16A16_Float));
             DebugLogger.Info("[DX12] Bloom combine shader loaded");
         }
@@ -1549,9 +1590,13 @@ public class DX12Renderer : IRenderer
 
         try
         {
-            string source = File.ReadAllText(compositePath);
-            source = PreprocessIncludes(source);
-            var psBytecode = CompileShader(source, "main", "dx_composite.hlsl", "ps_6_6", "ps_5_0");
+            byte[]? psBytecode = LoadEmbeddedShader("dx_composite");
+            if (psBytecode == null)
+            {
+                string source = File.ReadAllText(compositePath);
+                source = PreprocessIncludes(source);
+                psBytecode = CompileShader(source, "main", "dx_composite.hlsl", "ps_6_6", "ps_5_0");
+            }
             var psoDesc = CreatePSODesc(vsBytecode, psBytecode, Format.R8G8B8A8_UNorm);
             _compositePSO = _device.CreateGraphicsPipelineState(psoDesc);
             DebugLogger.Info("[DX12U] Composite shader loaded (DXC ps_6_6)");
@@ -1585,9 +1630,13 @@ public class DX12Renderer : IRenderer
 
         try
         {
-            string source = File.ReadAllText(overlayPath);
-            source = PreprocessIncludes(source);
-            var psBytecode = CompileShader(source, "main", "dx_overlay.hlsl", "ps_6_6", "ps_5_0");
+            byte[]? psBytecode = LoadEmbeddedShader("dx_overlay");
+            if (psBytecode == null)
+            {
+                string source = File.ReadAllText(overlayPath);
+                source = PreprocessIncludes(source);
+                psBytecode = CompileShader(source, "main", "dx_overlay.hlsl", "ps_6_6", "ps_5_0");
+            }
             var psoDesc = CreatePSODesc(vsBytecode, psBytecode, Format.R16G16B16A16_Float);
             _overlayPSO = _device.CreateGraphicsPipelineState(psoDesc);
             DebugLogger.Info("[DX12U] Overlay shader loaded (DXC ps_6_6)");
@@ -1621,9 +1670,13 @@ public class DX12Renderer : IRenderer
 
         try
         {
-            string source = File.ReadAllText(postfxPath);
-            source = PreprocessIncludes(source);
-            var psBytecode = CompileShader(source, "main", "dx_postfx.hlsl", "ps_6_6", "ps_5_0");
+            byte[]? psBytecode = LoadEmbeddedShader("dx_postfx");
+            if (psBytecode == null)
+            {
+                string source = File.ReadAllText(postfxPath);
+                source = PreprocessIncludes(source);
+                psBytecode = CompileShader(source, "main", "dx_postfx.hlsl", "ps_6_6", "ps_5_0");
+            }
             var psoDesc = CreatePSODesc(vsBytecode, psBytecode, Format.R16G16B16A16_Float);
             _postfxPSO = _device.CreateGraphicsPipelineState(psoDesc);
             DebugLogger.Info("[DX12U] PostFX shader loaded (DXC ps_6_6)");
@@ -1657,9 +1710,13 @@ public class DX12Renderer : IRenderer
 
         try
         {
-            string source = File.ReadAllText(tonemapPath);
-            source = PreprocessIncludes(source);
-            var psBytecode = CompileShader(source, "main", "dx_tonemap.hlsl", "ps_6_6", "ps_5_0");
+            byte[]? psBytecode = LoadEmbeddedShader("dx_tonemap");
+            if (psBytecode == null)
+            {
+                string source = File.ReadAllText(tonemapPath);
+                source = PreprocessIncludes(source);
+                psBytecode = CompileShader(source, "main", "dx_tonemap.hlsl", "ps_6_6", "ps_5_0");
+            }
             var psoDesc = CreatePSODesc(vsBytecode, psBytecode, Format.R8G8B8A8_UNorm);
             _tonemapPSO = _device.CreateGraphicsPipelineState(psoDesc);
             DebugLogger.Info("[DX12U] Tone-map shader loaded (DXC ps_6_6)");
@@ -1671,16 +1728,22 @@ public class DX12Renderer : IRenderer
 
         // Load fast tonemap (merged PostFX+Tonemap for spatial modes)
         string fastTonemapPath = Path.Combine(shaderDir, "dx_fast_tonemap.hlsl");
-        if (File.Exists(fastTonemapPath))
         {
             try
             {
-                string ftSource = File.ReadAllText(fastTonemapPath);
-                ftSource = PreprocessIncludes(ftSource);
-                var ftBytecode = CompileShader(ftSource, "main", "dx_fast_tonemap.hlsl", "ps_6_6", "ps_5_0");
-                var ftDesc = CreatePSODesc(vsBytecode, ftBytecode, Format.R8G8B8A8_UNorm);
-                _fastTonemapPSO = _device.CreateGraphicsPipelineState(ftDesc);
-                DebugLogger.Info("[DX12U] Fast tonemap shader loaded (DXC ps_6_6)");
+                byte[]? ftBytecode = LoadEmbeddedShader("dx_fast_tonemap");
+                if (ftBytecode == null && File.Exists(fastTonemapPath))
+                {
+                    string ftSource = File.ReadAllText(fastTonemapPath);
+                    ftSource = PreprocessIncludes(ftSource);
+                    ftBytecode = CompileShader(ftSource, "main", "dx_fast_tonemap.hlsl", "ps_6_6", "ps_5_0");
+                }
+                if (ftBytecode != null)
+                {
+                    var ftDesc = CreatePSODesc(vsBytecode, ftBytecode, Format.R8G8B8A8_UNorm);
+                    _fastTonemapPSO = _device.CreateGraphicsPipelineState(ftDesc);
+                    DebugLogger.Info("[DX12U] Fast tonemap shader loaded (DXC ps_6_6)");
+                }
             }
             catch (Exception e)
             {
@@ -1712,9 +1775,13 @@ public class DX12Renderer : IRenderer
 
         try
         {
-            string source = File.ReadAllText(skiaPath);
-            source = PreprocessIncludes(source);
-            var psBytecode = CompileShader(source, "main", "dx_skia_composite.hlsl", "ps_6_6", "ps_5_0");
+            byte[]? psBytecode = LoadEmbeddedShader("dx_skia_composite");
+            if (psBytecode == null)
+            {
+                string source = File.ReadAllText(skiaPath);
+                source = PreprocessIncludes(source);
+                psBytecode = CompileShader(source, "main", "dx_skia_composite.hlsl", "ps_6_6", "ps_5_0");
+            }
 
             // Create PSO with premultiplied alpha blend state
             var blendDesc = new BlendDescription

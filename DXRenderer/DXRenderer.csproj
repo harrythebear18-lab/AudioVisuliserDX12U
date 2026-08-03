@@ -7,7 +7,25 @@
     <Nullable>enable</Nullable>
     <UseWindowsForms>true</UseWindowsForms>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <!-- Native AOT disabled — incompatible with WinForms/System.Drawing. Use ReadyToRun at publish instead. -->
+    <!-- <PublishAot>true</PublishAot> -->
+    <PublishReadyToRun>true</PublishReadyToRun>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <!-- Strip debug symbols on publish -->
+    <DebugType>none</DebugType>
+    <DebugSymbols>false</DebugSymbols>
   </PropertyGroup>
+
+  <!-- Pre-build: compile all HLSL shaders to embedded bytecode -->
+  <Target Name="CompileShaders" BeforeTargets="BeforeBuild">
+    <Exec Command="powershell -ExecutionPolicy Bypass -File &quot;$(ProjectDir)compile_shaders.ps1&quot; -ShaderDir &quot;$(ProjectDir)..\\shaders&quot; -OutDir &quot;$(ProjectDir)compiled_shaders&quot;"
+          IgnoreExitCode="true" />
+  </Target>
+
+  <!-- Embed compiled shader bytecode as resources -->
+  <ItemGroup>
+    <EmbeddedResource Include="compiled_shaders\*.dxbc" />
+  </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="Vortice.Direct3D11" Version="3.8.3" />
