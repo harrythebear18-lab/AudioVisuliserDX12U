@@ -38,3 +38,6 @@ electron/node_modules/
 
 # Build-time compiled shader bytecode
 DXRenderer/compiled_shaders/
+
+# Distribution packages
+dist/
