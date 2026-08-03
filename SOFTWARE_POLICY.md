@@ -23,7 +23,7 @@ The Software is **free to use** for personal, educational, and commercial visual
 
 ## 3. Restrictions
 
-The following are **not permitted** without explicit written permission from the author:
+The following are **not permitted** without explicit written permission from Visentrix:
 
 ### 3.1 No Republishing
 - You may **not** redistribute, republish, repackage, or rehost the Software or its source code in any form.
@@ -43,7 +43,7 @@ The following are **not permitted** without explicit written permission from the
 
 ## 4. Intellectual Property
 
-All intellectual property rights in the Software — including but not limited to source code, shader code, DSP algorithms, audio analysis pipelines, rendering engine architecture, UI design, and visual identity — remain the sole property of the author.
+All intellectual property rights in the Software — including but not limited to source code, shader code, DSP algorithms, audio analysis pipelines, rendering engine architecture, UI design, and visual identity — remain the sole property of Visentrix.
 
 The Software is provided **as a compiled download**. Source code visibility (if any) does not constitute a grant of rights beyond those explicitly stated in this policy.
 
@@ -53,7 +53,7 @@ The Software is provided **as a compiled download**. Source code visibility (if 
 
 The Software is provided "as is" without warranty of any kind, express or implied, including but not limited to warranties of merchantability, fitness for a particular purpose, or non-infringement.
 
-The author is not liable for any damages, data loss, performance issues, or other consequences arising from the use or inability to use the Software.
+Visentrix is not liable for any damages, data loss, performance issues, or other consequences arising from the use or inability to use the Software.
 
 ---
 
@@ -65,8 +65,16 @@ Violation of any term in this policy automatically terminates your right to use 
 
 ## 7. Contact
 
-For licensing inquiries, permission requests, or questions about this policy, contact the author through the project's official communication channels.
+For licensing inquiries, permission requests, or questions about this policy, contact the Visentrix team through the project's official communication channels.
 
 ---
 
-© 2026 RTX Audio Visualizer. All rights reserved.
+## 8. Governing Law
+
+This policy shall be governed by and construed in accordance with the laws of England and Wales. Any disputes arising under this policy shall be subject to the exclusive jurisdiction of the courts of England and Wales.
+
+---
+
+© 2026 Visentrix. All rights reserved.
+
+RTX Audio Visualizer is a Visentrix product.

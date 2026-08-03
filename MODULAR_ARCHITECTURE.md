@@ -294,4 +294,6 @@ Modes 0–54 are registered in `DX12Renderer.cs` in two places:
 
 ---
 
-© 2026 RTX Audio Visualizer. All rights reserved.
+© 2026 Visentrix. All rights reserved.
+
+RTX Audio Visualizer is a Visentrix product.
