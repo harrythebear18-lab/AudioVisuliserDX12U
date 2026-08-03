@@ -11,7 +11,7 @@ $ErrorActionPreference = "Stop"
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $projectPath = Join-Path $projectRoot "DXRenderer\DXRenderer.csproj"
 $packageName = "RTXAudioVisualizer_v$Version"
-$packageDir = Join-Path $projectRoot $OutputDir $packageName
+$packageDir = Join-Path (Join-Path $projectRoot $OutputDir) $packageName
 
 Write-Host "[deploy] Building RTX Audio Visualizer v$Version..." -ForegroundColor Cyan
 
@@ -107,7 +107,7 @@ Set-Content -Path (Join-Path $packageDir "README.txt") -Value $readmeContent -En
 Write-Host "[deploy] Created README.txt" -ForegroundColor Green
 
 # Create zip
-$zipPath = Join-Path $projectRoot $OutputDir "$packageName.zip"
+$zipPath = Join-Path (Join-Path $projectRoot $OutputDir) "$packageName.zip"
 if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
 Compress-Archive -Path (Join-Path $packageDir "*") -DestinationPath $zipPath -CompressionLevel Optimal
 
