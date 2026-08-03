@@ -20,7 +20,7 @@
 
 #define PI 3.14159265
 #define MAX_RADIUS 4.0
-#define N_DEPTH 4
+#define N_DEPTH 2
 
 float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target
 {

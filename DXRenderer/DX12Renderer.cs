@@ -90,6 +90,7 @@ public class DX12Renderer : IRenderer
     private ID3D12DescriptorHeap _postfxRtvHeap = null!;
     private ID3D12PipelineState _postfxPSO = null!;
     private ID3D12PipelineState _tonemapPSO = null!;
+    private ID3D12PipelineState _fastTonemapPSO = null!;  // Merged PostFX+Tonemap for spatial modes
 
     // SkiaSharp 2D overlay layer
     private ID3D12Resource _skiaTex = null!;
@@ -182,6 +183,11 @@ public class DX12Renderer : IRenderer
     private int _currentMode;
     private bool _shouldResetGPU = false;
     public bool VSyncEnabled { get; set; } = true;
+
+    // Spatial encoder modes (30-48) have their own emitter glow, wave rings, and HDR clamping.
+    // They don't need the 4-pass bloom pipeline or SkiaSharp 2D overlay — skip for latency.
+    // Mode 29 (crystal_lattice) and 49 (fractal_explorer) are NOT spatial encoder modes.
+    private bool IsSpatialMode => _currentMode >= 30 && _currentMode <= 48;
 
     // Dragon head mesh — deferred (requires mesh shader PSO support)
     private ID3D12PipelineState _dragonPSO = null!;
@@ -1628,6 +1634,25 @@ public class DX12Renderer : IRenderer
         {
             DebugLogger.Error($"[DX12U] Tone-map shader failed: {e.Message}");
         }
+
+        // Load fast tonemap (merged PostFX+Tonemap for spatial modes)
+        string fastTonemapPath = Path.Combine(shaderDir, "dx_fast_tonemap.hlsl");
+        if (File.Exists(fastTonemapPath))
+        {
+            try
+            {
+                string ftSource = File.ReadAllText(fastTonemapPath);
+                ftSource = PreprocessIncludes(ftSource);
+                var ftBytecode = CompileShader(ftSource, "main", "dx_fast_tonemap.hlsl", "ps_6_6", "ps_5_0");
+                var ftDesc = CreatePSODesc(vsBytecode, ftBytecode, Format.R8G8B8A8_UNorm);
+                _fastTonemapPSO = _device.CreateGraphicsPipelineState(ftDesc);
+                DebugLogger.Info("[DX12U] Fast tonemap shader loaded (DXC ps_6_6)");
+            }
+            catch (Exception e)
+            {
+                DebugLogger.Error($"[DX12U] Fast tonemap shader failed: {e.Message}");
+            }
+        }
     }
 
     private void LoadSkiaShader(ReadOnlySpan<byte> vsBytecode)
@@ -1996,8 +2021,10 @@ public class DX12Renderer : IRenderer
             _commandList.DrawInstanced(4, 1, 0, 0);
         }
 
-        // ── Bloom pipeline (if enabled) ──
-        if (_bloomEnabled && _bloomExtractPSO != null && _bloomBlurHPSO != null && _bloomBlurVPSO != null)
+        // ── Bloom pipeline (if enabled and not a spatial mode) ──
+        // Spatial encoder modes (29+) have their own emitter glow — bloom is redundant
+        bool useBloom = _bloomEnabled && !IsSpatialMode && _bloomExtractPSO != null && _bloomBlurHPSO != null && _bloomBlurVPSO != null;
+        if (useBloom)
         {
             // Transition layerTex0: RenderTarget → PixelShaderResource (for extract)
             _commandList.ResourceBarrierTransition(_layerTex0, ResourceStates.RenderTarget, ResourceStates.PixelShaderResource);
@@ -2041,9 +2068,33 @@ public class DX12Renderer : IRenderer
             _commandList.ResourceBarrierTransition(_bloomTexture, ResourceStates.RenderTarget, ResourceStates.PixelShaderResource);
         }
 
-        // ── PostFX pass: layer0 + layer1 + bloom → _postfxTex (HDR) ──
+        // ── PostFX + Tonemap: two paths depending on mode type ──
+        if (IsSpatialMode && _fastTonemapPSO != null)
+        {
+            // FAST PATH: spatial modes — skip PostFX intermediate, go layer0 → backbuffer directly
+            _commandList.ResourceBarrierTransition(_layerTex0,
+                ResourceStates.RenderTarget, ResourceStates.PixelShaderResource);
+
+            // Transition back buffer: Common/Present → RenderTarget
+            var beforeState = _firstFrame ? ResourceStates.Common : ResourceStates.Present;
+            _commandList.ResourceBarrierTransition(_renderTargets[_frameIndex],
+                beforeState, ResourceStates.RenderTarget);
+
+            var backBufferRtv = _rtvHeap.GetCPUDescriptorHandleForHeapStart();
+            backBufferRtv += (int)(_rtvDescriptorSize * _frameIndex);
+            _commandList.ClearRenderTargetView(backBufferRtv, new Color4(0, 0, 0, 1));
+            _commandList.OMSetRenderTargets(backBufferRtv, null);
+
+            // Bind SRV table — fast tonemap reads t1=layer0 directly
+            _commandList.SetGraphicsRootDescriptorTable(4, srvGpuHandle);
+            _commandList.SetPipelineState(_fastTonemapPSO);
+            _commandList.DrawInstanced(4, 1, 0, 0);
+        }
+        else
+        {
+        // STANDARD PATH: PostFX → Tonemap for classic modes with bloom/overlay
         // Transition layers: RenderTarget → PixelShaderResource
-        if (!_bloomEnabled || _bloomExtractPSO == null)
+        if (!useBloom)
         {
             _commandList.ResourceBarrierTransition(_layerTex0,
                 ResourceStates.RenderTarget, ResourceStates.PixelShaderResource);
@@ -2070,13 +2121,11 @@ public class DX12Renderer : IRenderer
         }
         else if (_compositePSO != null)
         {
-            // Fallback to old composite if PostFX failed to load
             _commandList.SetPipelineState(_compositePSO);
             _commandList.DrawInstanced(4, 1, 0, 0);
         }
 
         // ── Tone-map pass: _postfxTex → backbuffer (LDR) ──
-        // Transition postfxTex: RenderTarget → PixelShaderResource
         _commandList.ResourceBarrierTransition(_postfxTex,
             ResourceStates.RenderTarget, ResourceStates.PixelShaderResource);
 
@@ -2090,7 +2139,6 @@ public class DX12Renderer : IRenderer
         _commandList.ClearRenderTargetView(backBufferRtv, new Color4(0, 0, 0, 1));
         _commandList.OMSetRenderTargets(backBufferRtv, null);
 
-        // Bind the complete SRV table so PostFxTex at register t6 resolves to postfxTex.
         _commandList.SetGraphicsRootDescriptorTable(4, srvGpuHandle);
 
         if (_tonemapPSO != null)
@@ -2100,14 +2148,14 @@ public class DX12Renderer : IRenderer
         }
         else if (_compositePSO != null)
         {
-            // Fallback: old composite reads t1=layer0 directly
-            _commandList.SetGraphicsRootDescriptorTable(4, srvGpuHandle);
             _commandList.SetPipelineState(_compositePSO);
             _commandList.DrawInstanced(4, 1, 0, 0);
         }
+        }
 
         // ── SkiaSharp 2D overlay pass: alpha-blend on backbuffer ──
-        if (_skiaEnabled && _skiaPSO != null && _skiaOverlay != null)
+        // Skip for spatial encoder modes — they don't use 2D overlay content
+        if (_skiaEnabled && !IsSpatialMode && _skiaPSO != null && _skiaOverlay != null)
         {
             // Render 2D overlay content on CPU
             var skiaPixels = _skiaOverlay.Render(_time, ref _currentAudioUBO);
@@ -2493,6 +2541,7 @@ public class DX12Renderer : IRenderer
         _postfxRtvHeap?.Dispose();
         _postfxPSO?.Dispose();
         _tonemapPSO?.Dispose();
+        _fastTonemapPSO?.Dispose();
         _skiaTex?.Dispose();
         _skiaUploadBuffer?.Dispose();
         _skiaPSO?.Dispose();

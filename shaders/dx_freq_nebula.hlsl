@@ -20,7 +20,7 @@
 #include "include/layers.hlsl"
 
 #define PI 3.14159265
-#define MARCH_STEPS 48
+#define MARCH_STEPS 24
 #define PLANET_R 1.5
 
 // Audio-driven terrain height on planet surface — uses emitter influence
