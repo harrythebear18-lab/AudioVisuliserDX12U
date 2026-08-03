@@ -179,6 +179,11 @@ public class DX12Renderer : IRenderer
         { "freq_nebula", "Sonic Sphereworld" },
         { "wave_field", "Spatiotemporal Wave Field" },
         { "fractal_explorer", "Fractal Dimension Explorer" },
+        { "neural_resonance", "Neural Resonance Lattice" },
+        { "quantum_microscope", "Quantum Spectral Microscope" },
+        { "hrtf_theater", "HRTF Spatial Theater" },
+        { "spectral_crystal", "Spectral Crystal Genesis" },
+        { "cymatic_standing", "Cymatic Standing Waves" },
     };
     private int _currentMode;
     private bool _shouldResetGPU = false;
@@ -212,6 +217,7 @@ public class DX12Renderer : IRenderer
     private bool _workGraphLoaded;
     private DX12HUD? _hud;
     private bool _hudVisible = true;
+    private PipelineValidator? _validator;
     private byte[]? _vsBytecode;
 
     // Bloom is handled by DX11 compositor — DX12 renders high-quality visualizer into shared texture
@@ -717,6 +723,9 @@ public class DX12Renderer : IRenderer
             _hud = null;
         }
 
+        _validator = new PipelineValidator();
+        DebugLogger.Info("[DX12Renderer] Pipeline validator created");
+
         bestAdapter.Dispose();
 
         DebugLogger.Info($"[DX12Renderer] Initialized: {_width}x{_height}, {_modeNames.Count} modes, WorkGraphs={_workGraphsSupported}");
@@ -891,6 +900,24 @@ public class DX12Renderer : IRenderer
         }
 
         byte[] bytecode = blob.AsBytes();
+
+        // Log warnings even on successful compile
+        IDxcBlobEncoding? warnBlob = result.GetErrorBuffer();
+        if (warnBlob != null)
+        {
+            string warnMsg = System.Text.Encoding.UTF8.GetString(warnBlob.AsBytes());
+            if (!string.IsNullOrWhiteSpace(warnMsg))
+                DebugLogger.Info($"[DX12U] DXC output for {fileName}: {warnMsg.Substring(0, Math.Min(warnMsg.Length, 500))}");
+            warnBlob.Dispose();
+        }
+
+        // Log bytecode header to verify format (DXBC vs DXIL)
+        if (bytecode.Length >= 8)
+        {
+            string header = System.Text.Encoding.ASCII.GetString(bytecode, 0, 4);
+            DebugLogger.Info($"[DX12U] Bytecode header for {fileName}: '{header}' ({bytecode.Length} bytes)");
+        }
+
         blob.Dispose();
         result.Dispose();
         return bytecode;
@@ -1044,6 +1071,11 @@ public class DX12Renderer : IRenderer
             "freq_nebula",       // 47. Sonic Sphereworld — SDF planet with audio terrain, atmosphere, meteors
             "wave_field",        // 48. Spatiotemporal Wave Field — 3D wave equation with audio sources
             "fractal_explorer",  // 49. Fractal Dimension Explorer — morphing 3D Mandelbulb
+            "neural_resonance",  // 50. Neural Resonance Lattice — DSP-driven 3D node lattice
+            "quantum_microscope",// 51. Quantum Spectral Microscope — zoom into frequency landscape
+            "hrtf_theater",      // 52. HRTF Spatial Theater — psychoacoustic sound source orbits
+            "spectral_crystal",  // 53. Spectral Crystal Genesis — audio-grown 3D crystal SDF
+            "cymatic_standing",  // 54. Cymatic Standing Waves — 3D Chladni patterns from audio
         };
 
         foreach (var mode in modes)
@@ -1060,6 +1092,8 @@ public class DX12Renderer : IRenderer
                 DebugLogger.Info($"[DX12] Compiling {mode} ({source.Length} bytes)...");
 
                 byte[] psBytecode = CompileShader(source, "main", $"dx_{mode}.hlsl", dxcTarget, fxcTarget);
+
+                DebugLogger.Info($"[DX12] PS bytecode for {mode}: {psBytecode.Length} bytes");
 
                 var psoDesc = CreatePSODesc(vsBytecode, psBytecode, Format.R16G16B16A16_Float);
                 var pso = _device.CreateGraphicsPipelineState(psoDesc);
@@ -1734,6 +1768,7 @@ public class DX12Renderer : IRenderer
     {
         if (_modeNames.Count == 0) return;
         _currentMode = (_currentMode + 1) % _modeNames.Count;
+        _validator?.Reset();
         DebugLogger.Info($"[DX12Renderer] Mode: {CurrentMode}");
     }
 
@@ -1741,6 +1776,7 @@ public class DX12Renderer : IRenderer
     {
         if (_modeNames.Count == 0) return;
         _currentMode = (_currentMode - 1 + _modeNames.Count) % _modeNames.Count;
+        _validator?.Reset();
         DebugLogger.Info($"[DX12Renderer] Mode: {CurrentMode}");
     }
 
@@ -1776,6 +1812,13 @@ public class DX12Renderer : IRenderer
         if (_hud != null) _hud.Visible = _hudVisible;
         DebugLogger.Info($"[DX12Renderer] HUD: {(_hudVisible ? "ON" : "OFF")}");
     }
+
+    public void ToggleValidator()
+    {
+        _validator?.Toggle();
+    }
+
+    public string GetValidatorHudLine() => _validator?.GetHudLine() ?? "Validator: off";
 
     public void ToggleSkiaOverlay()
     {
@@ -1914,6 +1957,7 @@ public class DX12Renderer : IRenderer
         _renderStartTicks = _renderTimer.ElapsedTicks;
         _deltaTime = time - _time;
         _time = time;
+        _validator?.BeginFrame();
 
         if (_verbose && _frameCount % 60 == 0)
         {
@@ -2205,6 +2249,8 @@ public class DX12Renderer : IRenderer
             _hud.VSyncEnabled = VSyncEnabled;
             _hud.FPS = _smoothedFPS;
             _hud.VRMode = _vrActive;
+            if (_validator != null)
+                _hud.SetValidatorLine(_validator.GetHudLine(), _validator.DiscrepancyPercent <= 0.15f);
             _hud.Render(_commandList, _lastFrame, dt);
         }
 
@@ -2237,6 +2283,9 @@ public class DX12Renderer : IRenderer
             float avg = _totalRenderTime / _frameCount;
             DebugLogger.Info($"[DX12Debug] Frame stats: avg={avg:F2}ms, min={_minRenderTime:F2}ms, max={_maxRenderTime:F2}ms, frames={_frameCount}");
         }
+
+        // Pipeline validation — cross-check HUD vs actual frame times
+        _validator?.EndFrame(_smoothedFPS, RenderLatencyMs, _lastFrame.LatTotalPipelineMs);
     }
 
     // ── Unified renderer: shared texture support ──

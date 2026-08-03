@@ -48,6 +48,15 @@ public class DX12HUD : IDisposable
     public float FPS { get; set; } = 0f;
     public bool VRMode { get; set; } = false;
 
+    // Pipeline validator display
+    private string? _validatorLine;
+    private Color _validatorColor = Color.White;
+    public void SetValidatorLine(string line, bool ok)
+    {
+        _validatorLine = line;
+        _validatorColor = ok ? Color.FromArgb(80, 255, 80) : Color.FromArgb(255, 200, 80);
+    }
+
     private static readonly string[] SectionNames = {
         "Unknown", "Intro", "Verse", "PreChorus", "Chorus",
         "BuildUp", "Drop", "Breakdown", "Bridge", "Interlude", "Outro"
@@ -337,8 +346,15 @@ public class DX12HUD : IDisposable
 
         lineList.Add("");
         colorList.Add(dim);
-        lineList.Add("Keys: H=HUD  P=Overlay  M/N=Mode  B=Director");
+        lineList.Add("Keys: H=HUD  P=Overlay  M/N=Mode  B=Director  K=Validator");
         colorList.Add(dim);
+
+        // Pipeline validator status
+        if (_validatorLine != null)
+        {
+            lineList.Add(_validatorLine);
+            colorList.Add(_validatorColor);
+        }
 
         lines = lineList.ToArray();
         colors = colorList.ToArray();

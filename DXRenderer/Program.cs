@@ -217,6 +217,9 @@ static class Program
                     if (ollamaFeedback != null) ollamaFeedback.Enabled = !ollamaFeedback.Enabled;
                     DebugLogger.Info($"OllamaFeedback: {(ollamaFeedback?.Enabled == true ? "ON" : "OFF")}");
                     break;
+                case Keys.K:
+                    dx12Renderer?.ToggleValidator();
+                    break;
                 case Keys.A:
                     // Toggle auto mode selection (manual override)
                     DebugLogger.Info("Auto mode selection toggle - manual override active");
